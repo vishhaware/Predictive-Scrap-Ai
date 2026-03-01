@@ -1,0 +1,46 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+backend/node_modules/
+
+# Build outputs
+dist/
+frontend/dist/
+backend/dist/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# Runtime data
+.runtime/
+backend/factory_brain.db
+backend/factory_brain.db-shm
+backend/factory_brain.db-wal
+backend_fastapi/factory_brain_fastapi.db
+backend_fastapi/factory_brain_fastapi.db-shm
+backend_fastapi/factory_brain_fastapi.db-wal
+*.db.bak
+*.tmp
+
+# Large local machine data (keep local; don't version raw dumps)
+frontend/Data/*.csv
+frontend/Data/*.xlsx
+frontend/Data/*.xls
+
+# Environment
+.env
+.env.*
+backend_fastapi/.env
+
+# Editor files
+.vscode/
+.idea/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+backend_fastapi/venv/

@@ -1,0 +1,257 @@
+{
+  "ok": true,
+  "checks": {
+    "backend_routes": {
+      "ok": true,
+      "detail": {
+        "required": [
+          "/api/health",
+          "/api/ai/metrics",
+          "/api/machines",
+          "/api/machines/{machine_id}/cycles",
+          "/api/machines/{machine_id}/parts",
+          "/api/machines/{machine_id}/control-room",
+          "/ws"
+        ],
+        "missing": []
+      }
+    },
+    "model_artifacts": {
+      "ok": true,
+      "detail": {
+        "risk_exists": true,
+        "forecaster_exists": true,
+        "risk_size_bytes": 2000106,
+        "forecaster_size_bytes": 17455267,
+        "risk_model_type": "LGBMClassifier",
+        "forecaster_model_type": "MultiOutputRegressor",
+        "risk_feature_count": 60,
+        "forecaster_feature_count": 60,
+        "forecaster_sensor_count": 15,
+        "forecaster_num_lags": 3,
+        "risk_features_missing_from_forecaster": [],
+        "risk_features_missing_count": 0,
+        "risk_column_style_detected": false
+      }
+    },
+    "sensor_mapping": {
+      "ok": true,
+      "detail": {
+        "data_access_map_count": 24,
+        "engine_map_count": 24,
+        "missing_engine_raw_in_data_access": [],
+        "frontend_name_mismatch_for_shared_raw": [],
+        "data_access_raw_missing_in_engine": []
+      }
+    },
+    "frontend_param_keys": {
+      "ok": true,
+      "detail": {
+        "operator_key_count": 8,
+        "engineer_key_count": 0,
+        "used_keys": [
+          "cushion",
+          "dosage_time",
+          "ejector_torque",
+          "injection_pressure",
+          "injection_time",
+          "shot_size",
+          "switch_position",
+          "temp_z8"
+        ],
+        "unknown_keys": []
+      }
+    },
+    "frontend_endpoint_contract": {
+      "ok": true,
+      "detail": {
+        "api_base_defined": true,
+        "required_suffixes": [
+          "/health",
+          "/machines",
+          "/cycles",
+          "/parts",
+          "/control-room"
+        ],
+        "missing_suffixes": [],
+        "suffix_found_in_files": {
+          "/health": [
+            "frontend\\src\\store\\useTelemetryStore.js",
+            "frontend\\src\\store\\useTelemetryStore.test.js"
+          ],
+          "/machines": [
+            "frontend\\src\\store\\useTelemetryStore.js",
+            "frontend\\src\\store\\useTelemetryStore.test.js"
+          ],
+          "/cycles": [
+            "frontend\\src\\store\\useTelemetryStore.js",
+            "frontend\\src\\store\\useTelemetryStore.test.js"
+          ],
+          "/parts": [
+            "frontend\\src\\store\\useTelemetryStore.js",
+            "frontend\\src\\store\\useTelemetryStore.test.js"
+          ],
+          "/control-room": [
+            "frontend\\src\\store\\useTelemetryStore.js",
+            "frontend\\src\\store\\useTelemetryStore.test.js"
+          ]
+        }
+      }
+    },
+    "frontend_machine_part_flow": {
+      "ok": true,
+      "detail": {
+        "checks": {
+          "store_has_part_loader": true,
+          "store_has_control_room_loader": true,
+          "store_switch_machine_updates_part_then_control": true,
+          "operator_has_part_selector": true,
+          "operator_part_change_triggers_refresh": true,
+          "header_machine_selector_calls_switch_machine": true
+        },
+        "files": {
+          "store": "frontend\\src\\store\\useTelemetryStore.js",
+          "operator": "frontend\\src\\views\\OperatorView.jsx",
+          "header": "frontend\\src\\components\\Header.jsx"
+        }
+      }
+    },
+    "vite_proxy_contract": {
+      "ok": true,
+      "detail": {
+        "checks": {
+          "proxy_api_route_present": true,
+          "proxy_ws_route_present": true,
+          "proxy_ws_enabled": true,
+          "backend_target_configurable": true,
+          "backend_ws_target_configurable": true
+        }
+      }
+    },
+    "runtime_contracts": {
+      "ok": true,
+      "detail": {
+        "connectivity": {
+          "data_dir": "c:\\new project\\New folder\\backend_fastapi\\..\\frontend\\Data",
+          "exists": true,
+          "csv_found": 5,
+          "expected": 5,
+          "missing_machine_csv": [],
+          "present_machine_csv": [
+            "M231-11",
+            "M356-57",
+            "M471-23",
+            "M607-30",
+            "M612-33"
+          ]
+        },
+        "parts_per_machine": {
+          "M231-11": 11,
+          "M356-57": 10,
+          "M471-23": 8,
+          "M607-30": 5,
+          "M612-33": 7
+        },
+        "control_room": {
+          "M231-11": {
+            "ok": true,
+            "requested_part": "8-1419168-4",
+            "resolved_part": "8-1419168-4",
+            "part_known": true,
+            "part_options": 11,
+            "future_points": 35,
+            "future_first_telemetry_sensors": 21,
+            "future_contains_scrap_probability": true,
+            "safe_limits": 18,
+            "risk_min": 0.0009509344181131436,
+            "risk_max": 0.0009661879881887768
+          },
+          "M356-57": {
+            "ok": true,
+            "requested_part": "1-968839-1",
+            "resolved_part": "1-968839-1",
+            "part_known": true,
+            "part_options": 10,
+            "future_points": 35,
+            "future_first_telemetry_sensors": 21,
+            "future_contains_scrap_probability": true,
+            "safe_limits": 18,
+            "risk_min": 7.122128343705308e-06,
+            "risk_max": 2.792457271471329e-05
+          },
+          "M471-23": {
+            "ok": true,
+            "requested_part": "2328456-1",
+            "resolved_part": "2328456-1",
+            "part_known": true,
+            "part_options": 8,
+            "future_points": 35,
+            "future_first_telemetry_sensors": 21,
+            "future_contains_scrap_probability": true,
+            "safe_limits": 18,
+            "risk_min": 3.7337834257620226e-05,
+            "risk_max": 0.0002775564615939529
+          },
+          "M607-30": {
+            "ok": true,
+            "requested_part": "1564254-1",
+            "resolved_part": "1564254-1",
+            "part_known": true,
+            "part_options": 5,
+            "future_points": 35,
+            "future_first_telemetry_sensors": 21,
+            "future_contains_scrap_probability": true,
+            "safe_limits": 18,
+            "risk_min": 0.0004362700606361833,
+            "risk_max": 0.0007776761662332787
+          },
+          "M612-33": {
+            "ok": true,
+            "requested_part": "2208339-1",
+            "resolved_part": "2208339-1",
+            "part_known": true,
+            "part_options": 7,
+            "future_points": 35,
+            "future_first_telemetry_sensors": 21,
+            "future_contains_scrap_probability": true,
+            "safe_limits": 18,
+            "risk_min": 0.9563419466494653,
+            "risk_max": 0.9939064565279407
+          }
+        },
+        "cycles_confidence": {
+          "M231-11": {
+            "rows": 120,
+            "confidence_min": 0.7457,
+            "confidence_max": 0.9575,
+            "confidence_mean": 0.8284141666666669
+          },
+          "M356-57": {
+            "rows": 120,
+            "confidence_min": 0.674,
+            "confidence_max": 0.8619,
+            "confidence_mean": 0.7435466666666667
+          },
+          "M471-23": {
+            "rows": 120,
+            "confidence_min": 0.7457,
+            "confidence_max": 0.9575,
+            "confidence_mean": 0.8284141666666669
+          },
+          "M607-30": {
+            "rows": 120,
+            "confidence_min": 0.7457,
+            "confidence_max": 0.9575,
+            "confidence_mean": 0.8284141666666669
+          },
+          "M612-33": {
+            "rows": 120,
+            "confidence_min": 0.7457,
+            "confidence_max": 0.9575,
+            "confidence_mean": 0.8284141666666669
+          }
+        }
+      }
+    }
+  }
+}

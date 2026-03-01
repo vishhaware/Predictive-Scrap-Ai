@@ -1,0 +1,13 @@
+{
+    "name": "predictive-scrap-ai-monorepo",
+    "version": "1.0.0",
+    "private": true,
+    "scripts": {
+        "dev": "npm run dev --prefix frontend",
+        "backend": "npm run start --prefix backend",
+        "install-all": "npm install --prefix frontend && npm install --prefix backend",
+        "test": "npm run test --prefix backend && npm run test --prefix frontend",
+        "test:fastapi": "cd backend_fastapi && python test_pipeline.py && python -m unittest test_sequence_model.py && python integration_audit.py --strict --output result.json",
+        "verify:all": "npm test && npm run test:fastapi && npm run build --prefix frontend"
+    }
+}

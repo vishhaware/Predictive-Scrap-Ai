@@ -1,0 +1,133 @@
+--- Row 1 ---
+variable_name: Time_on_machine
+Set value / Result (monitored): Not process related
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Time.
+
+--- Row 2 ---
+variable_name: Cushion
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: +/- 0,5 mm
+Main impacted process parameters: Influences part filling. Most important value to monitor for process stability and part quality!
+Remark: Resulting value when setting Switch position (mm)and holding pressure (bar)
+
+--- Row 3 ---
+variable_name: Injection_time
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: +/- 0,03 s
+Main impacted process parameters: Can impact cycle time. if this value varies a lot, something is very wrong in the process.
+Remark: Resulting value when setting the injection speed (mm/s)
+
+--- Row 4 ---
+variable_name: Dosage_time
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: +/- 1 s
+Main impacted process parameters: Influences amount of plastic in the barrel. Impacts cushion, cycle time, injection pressure, injection time, …) Highly impacts process stability!
+Remark: Resulting value when setting the dosing speed (rpm)
+
+--- Row 5 ---
+variable_name: Injection_pressure
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: +/- 100 bar
+Main impacted process parameters: Good indicator of process stability. If this varies a lot, something is wrong in the process.
+Remark: Resulting value when setting the injection speed (mm/s)
+
+--- Row 6 ---
+variable_name: Switch_pressure
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: +/- 100 bar
+Main impacted process parameters: Good indicator of process stability. If this varies a lot, something is wrong in the process.
+Remark: Resulting value when setting the injection speed (mm/s)
+
+--- Row 7 ---
+variable_name: Cycle_time
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: Impacts overall stability if not consistent.
+Remark: Resulting value of all process settings combined. (Mold movements, dosing speed, injection speed,  …)
+
+--- Row 8 ---
+variable_name: Extruder_start_position
+Set value / Result (monitored): Set value
+Standard threshold: nan
+Main impacted process parameters: Impacts cushion, injection time, dosing time, injection pressure, switch pressure.
+Remark: Monitored by machine in background. Not monitored by engineers.
+
+--- Row 9 ---
+variable_name: Cyl_tmp_z(1-x)
+Set value / Result (monitored): Set value
+Standard threshold: +/- 5°C
+Main impacted process parameters: Impacts cushion, injection time, dosing time, injection pressure, switch pressure.
+Remark: Setting of temperature of each heating zone. Machine regulates this to the set value, but similar to heating at home, this can deviate a little bit.
+
+--- Row 10 ---
+variable_name: Switch_position
+Set value / Result (monitored): Set value
+Standard threshold: +/- 0,05mm
+Main impacted process parameters: Impacts cushion, injection time, dosing time, injection pressure, switch pressure.
+Remark: Setting when injection stops and process switches to holding pressure.
+
+--- Row 11 ---
+variable_name: Machine_status
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Machine running or in error status.
+
+--- Row 12 ---
+variable_name: Scrap_counter
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: scrap counter
+
+--- Row 13 ---
+variable_name: Shot_counter
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: shot counter
+
+--- Row 14 ---
+variable_name: Shot_size
+Set value / Result (monitored): Set value
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Number of parts per shot. Defined by mold. Fixed value.
+
+--- Row 15 ---
+variable_name: Extruder_torque
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Monitored by machine in background. Not monitored by engineers.
+
+--- Row 16 ---
+variable_name: Peak_pressure_time
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Monitored by machine in background. Not monitored by engineers.
+
+--- Row 17 ---
+variable_name: Peak_pressure_position
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Monitored by machine in background. Not monitored by engineers.
+
+--- Row 18 ---
+variable_name: Ejector_fix_deviation_torque
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Monitored by machine in background. Not monitored by engineers.
+
+--- Row 19 ---
+variable_name: Alrams_array
+Set value / Result (monitored): Result (monitored value)
+Standard threshold: nan
+Main impacted process parameters: nan
+Remark: Machine alarm logging 
+

@@ -1,0 +1,30 @@
+{
+  "trained_at": "2026-03-01T05:25:17.309885+00:00",
+  "data_sources": {
+    "data_dir": "C:\\new project\\New folder\\frontend\\Data",
+    "mes_workbook": "C:\\new project\\New folder\\frontend\\Data\\MES_Manufacturing_M-231_M-356_M-471_M-607_M-612.xlsx",
+    "machine_files": [
+      "M231-11.csv",
+      "M356-57.csv",
+      "M471-23.csv",
+      "M607-30.csv",
+      "M612-33.csv"
+    ]
+  },
+  "rows_train": 139759,
+  "rows_val": 29948,
+  "rows_test": 29951,
+  "metrics": {
+    "classifier": {
+      "roc_auc": 0.9053325704114445,
+      "pr_auc": 0.4861346641844879
+    },
+    "regression": {
+      "mae": 47.83463923695806,
+      "rmse": 110.71674972547551
+    }
+  },
+  "feature_spec_hash": "b09faf6342b74634de00bd04a018f287849c2a278fe3d36c33b04509b7812c31",
+  "horizon_minutes": 1440,
+  "feature_count": 603
+}
