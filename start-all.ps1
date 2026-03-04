@@ -303,11 +303,154 @@ function Stop-NodeProcessesInPath {
     return @($killed | Select-Object -Unique)
 }
 
+function Get-FrontendLockHolderProcesses {
+    param([string]$FrontendDir)
+    $matchedProcesses = @()
+    $escapedFrontendDir = [Regex]::Escape($FrontendDir)
+    $patterns = @(
+        $escapedFrontendDir,
+        "vite",
+        "@esbuild\\win32-x64\\esbuild\.exe",
+        "@rollup\\rollup-win32-x64-msvc\\rollup\.win32-x64-msvc\.node",
+        "\\esbuild\.exe",
+        "rollup\.win32-x64-msvc\.node"
+    )
+    $candidateNames = @("node.exe", "npm.exe", "npm.cmd", "powershell.exe", "pwsh.exe", "cmd.exe")
+    try {
+        $procs = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue
+        foreach ($proc in $procs) {
+            $procName = ([string]$proc.Name).ToLowerInvariant()
+            if ($candidateNames -notcontains $procName) { continue }
+            $cmd = [string]$proc.CommandLine
+            if ([string]::IsNullOrWhiteSpace($cmd)) { continue }
+            $isMatch = $false
+            foreach ($pattern in $patterns) {
+                if ($cmd -match $pattern) {
+                    $isMatch = $true
+                    break
+                }
+            }
+            if (-not $isMatch) { continue }
+            $pid = [int]$proc.ProcessId
+            if ($pid -le 0 -or $pid -eq $PID) { continue }
+            $matchedProcesses += [pscustomobject]@{
+                ProcessId   = $pid
+                Name        = [string]$proc.Name
+                CommandLine = $cmd
+            }
+        }
+    }
+    catch {}
+    return @($matchedProcesses | Sort-Object ProcessId -Unique)
+}
+
+function Show-FrontendInstallDiagnostics {
+    param(
+        [string]$FrontendDir,
+        [int[]]$KnownPorts,
+        [string]$LockedPath
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($LockedPath)) {
+        Write-Step "[Diag] Locked file candidate: $LockedPath" Yellow
+    }
+
+    $holders = @(Get-FrontendLockHolderProcesses -FrontendDir $FrontendDir)
+    if ($holders.Count -gt 0) {
+        Write-Step "[Diag] Matching lock-holder processes:" Yellow
+        foreach ($holder in $holders) {
+            Write-Host ("  PID {0} ({1}) :: {2}" -f $holder.ProcessId, $holder.Name, $holder.CommandLine) -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Step "[Diag] No frontend lock-holder processes matched current filters." DarkGray
+    }
+
+    $portDetails = @()
+    foreach ($port in ($KnownPorts | Select-Object -Unique | Sort-Object)) {
+        try {
+            $listeners = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess -Unique
+            foreach ($listenerPid in $listeners) {
+                $portDetails += [pscustomobject]@{ Port = [int]$port; ProcessId = [int]$listenerPid }
+            }
+        }
+        catch {
+            if (Test-PortListening -Port ([int]$port)) {
+                $portDetails += [pscustomobject]@{ Port = [int]$port; ProcessId = $null }
+            }
+        }
+    }
+
+    if ($portDetails.Count -gt 0) {
+        Write-Step "[Diag] Listening frontend-related ports:" Yellow
+        foreach ($detail in $portDetails) {
+            if ($null -eq $detail.ProcessId) {
+                Write-Host ("  Port {0} (PID unknown)" -f $detail.Port) -ForegroundColor DarkGray
+            }
+            else {
+                Write-Host ("  Port {0} -> PID {1}" -f $detail.Port, $detail.ProcessId) -ForegroundColor DarkGray
+            }
+        }
+    }
+    else {
+        Write-Step "[Diag] No listeners found on known frontend ports." DarkGray
+    }
+}
+
+function Release-FrontendInstallLocks {
+    param(
+        [string]$FrontendDir,
+        [int[]]$KnownPorts = @(5173, 5174, 5175, 5176, 5177, 3000, 3001, 4173),
+        [switch]$Quiet
+    )
+
+    if (-not $Quiet) {
+        Write-Step "[Deps] Releasing frontend install locks..." DarkGray
+    }
+
+    $listenerPids = @(Get-ListeningPids -Ports $KnownPorts)
+    if ($listenerPids.Count -gt 0) {
+        if (-not $Quiet) {
+            Write-Step "Stopping frontend listener PID(s): $($listenerPids -join ', ')" Yellow
+        }
+        Stop-ProcessSafe -ProcessIds $listenerPids
+    }
+
+    $lockHolders = @(Get-FrontendLockHolderProcesses -FrontendDir $FrontendDir)
+    $lockHolderPids = @(
+        $lockHolders |
+        Select-Object -ExpandProperty ProcessId -Unique |
+        Where-Object { $_ -gt 0 -and ($_ -notin $listenerPids) }
+    )
+    if ($lockHolderPids.Count -gt 0) {
+        if (-not $Quiet) {
+            Write-Step "Stopping frontend lock-holder PID(s): $($lockHolderPids -join ', ')" Yellow
+        }
+        Stop-ProcessSafe -ProcessIds $lockHolderPids
+    }
+
+    Start-Sleep -Seconds 2
+
+    return [pscustomobject]@{
+        ListenerPids   = @($listenerPids)
+        LockHolderPids = @($lockHolderPids)
+    }
+}
+
 function Install-FrontendDepsRobust {
     param([string]$FrontendDir)
     $esbuildExe = Join-Path $FrontendDir "node_modules\@esbuild\win32-x64\esbuild.exe"
+    $rollupBinary = Join-Path $FrontendDir "node_modules\@rollup\rollup-win32-x64-msvc\rollup.win32-x64-msvc.node"
+    $knownFrontendPorts = @(5173, 5174, 5175, 5176, 5177, 3000, 3001, 4173)
     $maxAttempts = 3
+
+    Release-FrontendInstallLocks -FrontendDir $FrontendDir -KnownPorts $knownFrontendPorts | Out-Null
+
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        if ($attempt -gt 1) {
+            Release-FrontendInstallLocks -FrontendDir $FrontendDir -KnownPorts $knownFrontendPorts | Out-Null
+        }
+
         Write-Step "[Deps] Frontend install attempt $attempt/$maxAttempts..."
         Push-Location $FrontendDir
         try {
@@ -322,17 +465,54 @@ function Install-FrontendDepsRobust {
         catch {
             $msg = $_.Exception.Message
             Write-Step "[WARN] npm install attempt failed: $msg" Yellow
-            if ($attempt -ge $maxAttempts) { throw }
+            $lockedPath = $null
+            if ($msg -match "path\s+([A-Za-z]:\\[^\r\n]+)") {
+                $lockedPath = ($Matches[1] -replace "'", "").Trim()
+            }
+            if (-not $lockedPath) {
+                if ($msg -match "esbuild\.exe") {
+                    $lockedPath = $esbuildExe
+                }
+                elseif ($msg -match "rollup\.win32-x64-msvc\.node") {
+                    $lockedPath = $rollupBinary
+                }
+            }
 
-            # Common Windows lock case: esbuild.exe in use.
-            $killed = Stop-NodeProcessesInPath -PathHint $FrontendDir
-            if ($killed.Count -gt 0) {
-                Write-Step "Stopped node lock-holder PID(s): $($killed -join ', ')" Yellow
+            $isEpermLock = (($msg -match "EPERM|operation not permitted") -and ($msg -match "unlink"))
+            if ($isEpermLock) {
+                Write-Step "[WARN] Detected EPERM unlink lock signature." Yellow
             }
-            if (Test-Path $esbuildExe) {
-                try { attrib -R $esbuildExe 2>$null | Out-Null } catch {}
-                try { Remove-Item -Path $esbuildExe -Force -ErrorAction SilentlyContinue } catch {}
+            Show-FrontendInstallDiagnostics -FrontendDir $FrontendDir -KnownPorts $knownFrontendPorts -LockedPath $lockedPath
+
+            if ($attempt -ge $maxAttempts) {
+                Write-Step "[ERROR] Frontend dependency install failed after $maxAttempts attempts." Red
+                Write-Host "Remediation commands:" -ForegroundColor Yellow
+                Write-Host "  Get-CimInstance Win32_Process | Where-Object { (`$_.Name -match 'node|npm|powershell|pwsh|cmd') -and (`$_.CommandLine -match 'frontend|vite|esbuild|rollup') } | Select-Object ProcessId,Name,CommandLine" -ForegroundColor DarkGray
+                Write-Host "  Get-NetTCPConnection -State Listen | Where-Object { `$_.LocalPort -in 5173,5174,5175,5176,5177,3000,3001,4173 } | Select-Object LocalPort,OwningProcess" -ForegroundColor DarkGray
+                Write-Host "  .\start-all.ps1 -InstallDeps" -ForegroundColor DarkGray
+                throw
             }
+
+            Release-FrontendInstallLocks -FrontendDir $FrontendDir -KnownPorts $knownFrontendPorts | Out-Null
+            if ($isEpermLock -and $lockedPath -and (Test-Path $lockedPath)) {
+                try { attrib -R $lockedPath 2>$null | Out-Null } catch {}
+                $deleted = $false
+                for ($i = 1; $i -le 6; $i++) {
+                    try {
+                        Remove-Item -Path $lockedPath -Force -ErrorAction Stop
+                    }
+                    catch {}
+                    if (-not (Test-Path $lockedPath)) {
+                        $deleted = $true
+                        break
+                    }
+                    Start-Sleep -Milliseconds 400
+                }
+                if (-not $deleted -and (Test-Path $lockedPath)) {
+                    Write-Step "[WARN] Locked path is still present after retries: $lockedPath" Yellow
+                }
+            }
+
             Start-Sleep -Seconds 2
         }
         finally {
@@ -602,6 +782,15 @@ try {
         Reset-IngestionCursor -PythonExe $pythonExe -BackendDbPath $backendDbPath -RuntimeDir $runtimeDir
     }
 
+    if (-not $NoPortCleanup) {
+        $portsToClean = @($BackendPort, $FrontendPort, 8000, 8001, 8002, 5174, 5175, 5176, 5177, 3000, 3001, 4173) | Select-Object -Unique
+        Write-Step "[1/5] Releasing ports: $($portsToClean -join ', ')..."
+        Release-FrontendInstallLocks -FrontendDir $frontendDir -KnownPorts $portsToClean | Out-Null
+    }
+    else {
+        Write-Step "[1/5] Port cleanup skipped (-NoPortCleanup)." Yellow
+    }
+
     if ($InstallDeps) {
         Write-Step "[Preflight] Installing/updating dependencies..."
         Push-Location $backendDir
@@ -619,24 +808,6 @@ try {
         if (-not (Test-Path (Join-Path $frontendDir "node_modules"))) {
             Write-Step "[WARN] frontend/node_modules missing. Run with -InstallDeps or run npm install in frontend." Yellow
         }
-    }
-
-    if (-not $NoPortCleanup) {
-        $portsToClean = @($BackendPort, $FrontendPort, 8000, 8001, 8002, 5174, 3000, 3001, 4173) | Select-Object -Unique
-        Write-Step "[1/5] Releasing ports: $($portsToClean -join ', ')..."
-        $stalePids = @(Get-ListeningPids -Ports $portsToClean)
-        if ($stalePids.Count -gt 0) {
-            Write-Step "Stopping stale listener process(es): $($stalePids -join ', ')" Yellow
-            Stop-ProcessSafe -ProcessIds $stalePids
-            Start-Sleep -Seconds 1
-        }
-        else {
-            Write-Step "No stale listeners found." Green
-        }
-
-    }
-    else {
-        Write-Step "[1/5] Port cleanup skipped (-NoPortCleanup)." Yellow
     }
 
     $resolvedBackendPort = Resolve-BackendPort -PreferredPort $BackendPort
