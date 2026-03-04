@@ -679,7 +679,12 @@ def run_training_pipeline(
     config = cfg or TrainConfig()
     started = time.time()
 
-    dataset, data_meta = build_training_dataset(db=db, machine_ids=machine_ids, lookback_cycles=15000)
+    dataset, data_meta = build_training_dataset(
+        db=db,
+        machine_ids=machine_ids,
+        lookback_cycles=15000,
+        lookback_hours=24,
+    )
     if dataset.empty:
         return {"ok": False, "error": "No training data found", "dataset": data_meta}
 

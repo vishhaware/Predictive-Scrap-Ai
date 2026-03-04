@@ -1,10 +1,9 @@
 import React from 'react';
-import { Activity, BarChart2, Factory, LayoutDashboard, Settings, Bell } from 'lucide-react';
+import { Activity, Factory, LayoutDashboard, Settings, Bell } from 'lucide-react';
 import { useTelemetryStore } from '../store/useTelemetryStore';
 
 const NAV_ITEMS = [
-    { id: 'operator', icon: LayoutDashboard, label: 'Operator Dashboard' },
-    { id: 'engineer', icon: BarChart2, label: 'Process Engineer' },
+    { id: 'operator', icon: LayoutDashboard, label: 'Process Dashboard' },
     { id: 'manager', icon: Factory, label: 'Plant Manager' },
     { id: 'alerts', icon: Bell, label: 'Alert Center' },
     { id: 'audit', icon: Activity, label: 'Audit Log' },

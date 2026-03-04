@@ -458,7 +458,7 @@ WS_STREAM_LIMIT = _env_int("WS_STREAM_LIMIT", 20)
 WS_STREAM_INTERVAL_SEC = _env_float("WS_STREAM_INTERVAL_SEC", 3.0)
 WATCHDOG_INTERVAL_SEC = max(5.0, _env_float("WATCHDOG_INTERVAL_SEC", 15.0))
 MODEL_REFRESH_INTERVAL_SEC = max(10.0, _env_float("MODEL_REFRESH_INTERVAL_SEC", 30.0))
-AUTO_TRAIN_INTERVAL_SEC = max(300.0, _env_float("AUTO_TRAIN_INTERVAL_SEC", 3600.0))
+AUTO_TRAIN_INTERVAL_SEC = max(300.0, _env_float("AUTO_TRAIN_INTERVAL_SEC", 86400.0))
 AUTO_TRAIN_ENABLED = _env_bool("AUTO_TRAIN_ENABLED", False)
 AUTO_TRAIN_AUTO_PROMOTE = _env_bool("AUTO_TRAIN_AUTO_PROMOTE", False)
 AUTO_TRAIN_MACHINE_IDS = _env_csv_list("AUTO_TRAIN_MACHINE_IDS")
@@ -466,6 +466,8 @@ AUTO_TRAIN_SEGMENT_ID = os.getenv("AUTO_TRAIN_SEGMENT_ID")
 MAX_MODEL_JOBS_HISTORY = max(50, _env_int("MAX_MODEL_JOBS_HISTORY", 300))
 PRUNE_BATCH_SIZE = max(1, min(_env_int("PRUNE_BATCH_SIZE", 500), 900))
 CSV_RESUME_CHUNK_ROWS = max(1000, min(_env_int("CSV_RESUME_CHUNK_ROWS", 20000), 100000))
+FLEET_CHART_CACHE_TTL_SEC = max(5.0, _env_float("FLEET_CHART_CACHE_TTL_SEC", 30.0))
+MACHINE_CHART_CACHE_TTL_SEC = max(5.0, _env_float("MACHINE_CHART_CACHE_TTL_SEC", 30.0))
 
 # Runtime state
 machine_contexts: Dict[str, Dict[str, Any]] = {}
@@ -485,6 +487,8 @@ connectivity_state: Dict[str, Any] = {
 MAX_ERROR_MESSAGE_LEN = 600
 part_catalog_cache: Dict[str, Any] = {"mtime": None, "data": {}}
 part_timeline_cache: Dict[str, Any] = {"mtime": None, "data": {}}
+fleet_chart_cache: Dict[str, Any] = {"key": None, "expires_at": 0.0, "payload": None}
+machine_chart_cache: Dict[str, Dict[str, Any]] = {}
 PREDICTIVE_CSV_FILENAME = "MES_Manufacturing_M-231_M-356_M-471_M-607_M-612.xlsx - Data.csv"
 PREDICTIVE_CSV_CANDIDATES = [
     os.getenv("PREDICTIVE_SOURCE_CSV"),
@@ -1252,6 +1256,44 @@ def _rolling_volatility_pct(values: List[float], window_size: int = 6) -> List[f
         variance = sum((value - mean) ** 2 for value in window) / len(window)
         volatilities.append(float(max(0.0, variance) ** 0.5))
     return volatilities
+
+
+def _sorted_cycles_asc(cycles: List[models.Cycle]) -> List[models.Cycle]:
+    return sorted(
+        list(cycles or []),
+        key=lambda cycle: (cycle.timestamp, int(getattr(cycle, "id", 0) or 0)),
+    )
+
+
+def _extract_cycle_scrap_counter(cycle: models.Cycle) -> Optional[float]:
+    telemetry = cycle.data or {}
+    if isinstance(telemetry, dict) and isinstance(telemetry.get("telemetry"), dict):
+        telemetry = telemetry.get("telemetry") or {}
+    return _extract_scrap_counter(telemetry)
+
+
+def _compute_observed_scrap_series(cycles: List[models.Cycle], window_size: int = 20) -> Tuple[List[int], List[float]]:
+    events: List[int] = []
+    observed_pct: List[float] = []
+    rolling_window: List[int] = []
+    previous_scrap_counter: Optional[float] = None
+    safe_window = max(2, int(window_size))
+
+    for cycle in cycles:
+        current_scrap_counter = _extract_cycle_scrap_counter(cycle)
+        event = 0
+        if current_scrap_counter is not None and previous_scrap_counter is not None:
+            event = 1 if current_scrap_counter > previous_scrap_counter else 0
+        if current_scrap_counter is not None:
+            previous_scrap_counter = current_scrap_counter
+
+        events.append(event)
+        rolling_window.append(event)
+        if len(rolling_window) > safe_window:
+            rolling_window.pop(0)
+        observed_pct.append(float(sum(rolling_window) / max(1, len(rolling_window)) * 100.0))
+
+    return events, observed_pct
 
 
 def _floor_timestamp_to_bucket(ts: datetime, bucket_minutes: int) -> datetime:
@@ -2267,6 +2309,18 @@ def _safe_cycle_timestamp(timestamp: str) -> Optional[datetime]:
         return datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
+
+
+def _latest_machine_cycle_timestamp(db: Session, machine_id: str) -> Optional[datetime]:
+    latest_row = (
+        db.query(models.Cycle.timestamp)
+        .filter(models.Cycle.machine_id == machine_id)
+        .order_by(models.Cycle.timestamp.desc(), models.Cycle.id.desc())
+        .first()
+    )
+    if not latest_row:
+        return None
+    return latest_row[0]
 
 
 def _build_recent_sensor_history(cycles: List[models.Cycle]) -> pd.DataFrame:
@@ -3451,8 +3505,45 @@ async def _build_machine_chart_data_payload(
     clamped_shift_hours = max(1, min(int(shift_hours), 168))
     resolved_part_number = _normalize_part_number(part_number) if part_number else None
 
+    cache_key = f"{resolved_machine_id}|{resolved_part_number or ''}|{clamped_horizon}|{clamped_history_limit}|{clamped_shift_hours}"
+    cache_entry = machine_chart_cache.get(cache_key)
+    now_epoch = time.time()
+    if cache_entry and float(cache_entry.get("expires_at", 0.0)) > now_epoch:
+        payload = cache_entry.get("payload")
+        if isinstance(payload, dict):
+            return payload
+
+    def _build_empty_payload(no_data_reason: str, part_scope_mode: str, part_scope: str) -> Dict[str, Any]:
+        stats = (
+            db.query(models.MachineStats)
+            .filter(models.MachineStats.machine_id == resolved_machine_id)
+            .first()
+        )
+        ingestion_time = getattr(stats, "last_loaded_timestamp", None) if stats else None
+        return {
+            "machine_id": resolved_machine_id,
+            "part_number": resolved_part_number,
+            "past": [],
+            "future": [],
+            "meta": {
+                "past_last_ts": None,
+                "future_first_ts": None,
+                "seam_ok": False,
+                "horizon_used_minutes": clamped_horizon,
+                "max_horizon_minutes": 1920,
+                "ingestion_time": ingestion_time,
+                "generated_at": _now_iso(),
+                "source_version": "5.2.0",
+                "machine_id": resolved_machine_id,
+                "part_number": resolved_part_number,
+                "part_scope_mode": part_scope_mode,
+                "part_filter_scope": part_scope,
+                "no_data_reason": no_data_reason,
+            },
+        }
+
     shift_cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=clamped_shift_hours)
-    cycles = (
+    raw_cycles = (
         db.query(models.Cycle)
         .options(joinedload(models.Cycle.prediction))
         .filter(models.Cycle.machine_id == resolved_machine_id)
@@ -3461,8 +3552,18 @@ async def _build_machine_chart_data_payload(
         .limit(clamped_history_limit)
         .all()
     )
-    if not cycles:
-        cycles = (
+
+    if resolved_part_number and not raw_cycles:
+        payload = _build_empty_payload(
+            no_data_reason=f"No machine telemetry found in last {clamped_shift_hours}h for strict machine+part scope.",
+            part_scope_mode="strict_24h_machine_part",
+            part_scope="machine+part_no_data",
+        )
+        machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
+        return payload
+
+    if not raw_cycles:
+        raw_cycles = (
             db.query(models.Cycle)
             .options(joinedload(models.Cycle.prediction))
             .filter(models.Cycle.machine_id == resolved_machine_id)
@@ -3470,11 +3571,35 @@ async def _build_machine_chart_data_payload(
             .limit(clamped_history_limit)
             .all()
         )
-    cycles = list(reversed(cycles))
+
+    cycles_for_chart = _sorted_cycles_asc(raw_cycles)
+    part_filter_scope = "machine_only"
+    part_scope_mode = "machine_window"
+    no_data_reason: Optional[str] = None
+
+    if resolved_part_number:
+        part_scope_mode = "strict_24h_machine_part"
+        part_cycles, part_meta = _filter_cycles_by_part_timeline(
+            raw_cycles,
+            resolved_machine_id,
+            resolved_part_number,
+        )
+        if not part_cycles:
+            no_data_reason = str(part_meta.get("message") or f"No last-{clamped_shift_hours}h cycles for selected part.")
+            payload = _build_empty_payload(
+                no_data_reason=no_data_reason,
+                part_scope_mode=part_scope_mode,
+                part_scope="machine+part_no_data",
+            )
+            machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
+            return payload
+        cycles_for_chart = _sorted_cycles_asc(part_cycles)
+        part_filter_scope = "machine+part"
 
     past_rates_pct: List[float] = []
     past_rows: List[Dict[str, Any]] = []
-    for cycle in cycles:
+    observed_events, observed_pct_series = _compute_observed_scrap_series(cycles_for_chart, window_size=20)
+    for idx, cycle in enumerate(cycles_for_chart):
         scrap_prob = _clamp_scrap_probability(
             cycle.prediction.scrap_probability if cycle.prediction else 0.0
         )
@@ -3485,6 +3610,9 @@ async def _build_machine_chart_data_payload(
                 "timestamp": cycle.timestamp.isoformat(),
                 "scrap_prob": round(scrap_prob, 6),
                 "scrap_pct": round(scrap_pct, 4),
+                "model_scrap_pct": round(scrap_pct, 4),
+                "observed_scrap_event": int(observed_events[idx]) if idx < len(observed_events) else 0,
+                "observed_scrap_pct": round(observed_pct_series[idx], 4) if idx < len(observed_pct_series) else 0.0,
                 "volatility_6pt": 0.0,
                 "segment": "Past",
                 "source": "observed",
@@ -3505,12 +3633,21 @@ async def _build_machine_chart_data_payload(
             shift_hours=clamped_shift_hours,
             db=db,
         )
+        no_data_reason = control_room_payload.get("no_data_reason") or no_data_reason
+        part_scope_mode = str(control_room_payload.get("part_scope_mode") or part_scope_mode)
+        part_filter_scope = str(control_room_payload.get("part_filter_scope") or part_filter_scope)
         raw_timeline = control_room_payload.get("future_timeline")
         if isinstance(raw_timeline, list):
             future_timeline = raw_timeline
     except HTTPException as exc:
         if not past_rows:
-            raise exc
+            payload = _build_empty_payload(
+                no_data_reason=str(exc.detail),
+                part_scope_mode=part_scope_mode,
+                part_scope=part_filter_scope,
+            )
+            machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
+            return payload
 
     future_rates_pct = [
         _clamp_scrap_probability(row.get("scrap_probability")) * 100.0
@@ -3550,7 +3687,7 @@ async def _build_machine_chart_data_payload(
     ingestion_time = getattr(stats, "last_loaded_timestamp", None) if stats else None
     resolved_part = control_room_payload.get("part_number") or resolved_part_number
 
-    return {
+    payload = {
         "machine_id": resolved_machine_id,
         "part_number": resolved_part,
         "past": past_rows,
@@ -3566,8 +3703,13 @@ async def _build_machine_chart_data_payload(
             "source_version": "5.2.0",
             "machine_id": resolved_machine_id,
             "part_number": resolved_part,
+            "part_scope_mode": part_scope_mode,
+            "part_filter_scope": part_filter_scope,
+            "no_data_reason": no_data_reason,
         },
     }
+    machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
+    return payload
 
 
 @app.get("/api/machines", response_model=List[MachineSummary])

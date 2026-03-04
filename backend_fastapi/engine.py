@@ -588,7 +588,7 @@ def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTrack
         "Shot_counter",
     }
     target_sensors = [
-        k for k in THRESHOLDS.keys()
+        k for k in local_thresholds.keys()
         if k not in excluded_inference_fields
     ]
     
@@ -629,7 +629,7 @@ def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTrack
         drift_results = {}
         overall_drift = "none"
 
-        for var_name in THRESHOLDS.keys():
+        for var_name in local_thresholds.keys():
             val = shot.get(var_name)
             if isinstance(val, (int, float)):
                 res = drift_tracker.update(var_name, val)
@@ -705,7 +705,7 @@ def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTrack
             if val is None:
                 continue
             
-            threshold = THRESHOLDS.get(csv_name)
+            threshold = local_thresholds.get(csv_name)
             baseline = drift_tracker.baselines.get(csv_name)
             
             # Safely handle numeric conversion for telemetry

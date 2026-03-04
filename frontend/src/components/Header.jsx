@@ -4,7 +4,7 @@ import { t } from '../utils/i18n';
 import { formatTelemetryTime } from '../utils/time';
 
 const VIEW_LABELS = {
-    operator: 'operatorView',
+    operator: 'engineerView',
     engineer: 'engineerView',
     manager: 'managerView',
     alerts: 'alertCenter',

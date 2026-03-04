@@ -153,6 +153,7 @@ def build_training_dataset(
     db: Session,
     machine_ids: Optional[List[str]] = None,
     lookback_cycles: int = 5000,
+    lookback_hours: int = 24,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     query = db.query(models.Cycle).options(joinedload(models.Cycle.prediction)).order_by(models.Cycle.timestamp.asc(), models.Cycle.id.asc())
     if machine_ids:
@@ -187,6 +188,18 @@ def build_training_dataset(
         return pd.DataFrame(), {"rows": 0, "rows_mapped_part": 0, "fingerprint": None}
 
     df = pd.DataFrame(rows).sort_values(["machine_id", "timestamp", "cycle_row_id"]).reset_index(drop=True)
+
+    safe_lookback_hours = max(1, int(lookback_hours))
+    pruned_frames: List[pd.DataFrame] = []
+    for machine_id, machine_df in df.groupby("machine_id", sort=False):
+        latest_ts = machine_df["timestamp"].max()
+        if pd.isna(latest_ts):
+            continue
+        cutoff = pd.Timestamp(latest_ts).to_pydatetime().replace(tzinfo=None) - timedelta(hours=safe_lookback_hours)
+        pruned_frames.append(machine_df[machine_df["timestamp"] >= cutoff])
+    if pruned_frames:
+        df = pd.concat(pruned_frames, ignore_index=True)
+    df = df.sort_values(["machine_id", "timestamp", "cycle_row_id"]).reset_index(drop=True)
     df = df.drop_duplicates(subset=["machine_id", "timestamp"], keep="last")
 
     # derive scrap event from counter delta
@@ -228,6 +241,7 @@ def build_training_dataset(
         "rows_mapped_part": int((df["part_number"] != "UNKNOWN").sum()),
         "machines": int(df["machine_id"].nunique()),
         "parts": int(df["part_number"].nunique()),
+        "lookback_hours": int(safe_lookback_hours),
         "fingerprint": fingerprint,
     }
     return df, meta

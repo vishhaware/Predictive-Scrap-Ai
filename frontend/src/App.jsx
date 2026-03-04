@@ -82,12 +82,24 @@ function App() {
 
   const renderView = () => {
     switch (activeView) {
-      case 'operator': return <PredictiveDashboard />;
+      case 'operator':
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+            <EngineerView />
+            <PredictiveDashboard />
+          </div>
+        );
       case 'engineer': return <EngineerView />;
       case 'manager': return <ManagerView />;
       case 'alerts': return <AlertCenter onNav={handleNav} />;
       case 'audit': return <AuditLog />;
-      default: return <PredictiveDashboard />;
+      default:
+        return (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-6)' }}>
+            <EngineerView />
+            <PredictiveDashboard />
+          </div>
+        );
     }
   };
 
