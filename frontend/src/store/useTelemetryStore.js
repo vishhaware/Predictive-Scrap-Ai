@@ -526,4 +526,135 @@ export const useTelemetryStore = create((set, get) => ({
         const { auditLog } = get();
         set({ auditLog: [{ id: Date.now(), ts: new Date().toLocaleTimeString(), ...entry }, ...auditLog.slice(0, 49)] });
     },
+
+    // ── Parameter Management ───────────────────────────────────────────────────────
+    parameterConfigs: [],
+    parameterLoading: false,
+    parameterEditHistory: [],
+
+    async loadParameters(machineId, parameterName) {
+        set({ parameterLoading: true });
+        try {
+            const params = new URLSearchParams();
+            if (machineId) params.append('machine_id', machineId);
+            if (parameterName) params.append('parameter_name', parameterName);
+
+            const data = await fetchJson(`${API_BASE}/admin/parameters?${params}`);
+            set({ parameterConfigs: data, parameterLoading: false });
+        } catch (error) {
+            console.error('Failed to load parameters:', error);
+            set({ parameterLoading: false });
+        }
+    },
+
+    async saveParameter(parameterData) {
+        try {
+            const response = await fetch(`${API_BASE}/admin/parameters`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(parameterData),
+            });
+            if (!response.ok) throw new Error('Failed to save parameter');
+            const result = await response.json();
+            // Reload parameters after save
+            await get().loadParameters(parameterData.machine_id);
+            return result;
+        } catch (error) {
+            console.error('Failed to save parameter:', error);
+            throw error;
+        }
+    },
+
+    async revertParameterToCSV(parameterId) {
+        try {
+            const response = await fetch(`${API_BASE}/admin/parameters/${parameterId}/revert`, {
+                method: 'POST',
+            });
+            if (!response.ok) throw new Error('Failed to revert parameter');
+            // Reload parameters after revert
+            await get().loadParameters();
+            return true;
+        } catch (error) {
+            console.error('Failed to revert parameter:', error);
+            throw error;
+        }
+    },
+
+    async loadParameterHistory(parameterName, limit = 100) {
+        try {
+            const params = new URLSearchParams();
+            if (parameterName) params.append('parameter_name', parameterName);
+            params.append('limit', limit);
+
+            const data = await fetchJson(`${API_BASE}/admin/parameter-history?${params}`);
+            set({ parameterEditHistory: data });
+        } catch (error) {
+            console.error('Failed to load parameter history:', error);
+        }
+    },
+
+    // ── Validation Rules ───────────────────────────────────────────────────────────
+    validationRules: [],
+    validationLoading: false,
+    dataQualityViolations: [],
+
+    async loadValidationRules(sensorName, machineId) {
+        set({ validationLoading: true });
+        try {
+            const params = new URLSearchParams();
+            if (sensorName) params.append('sensor_name', sensorName);
+            if (machineId) params.append('machine_id', machineId);
+
+            const data = await fetchJson(`${API_BASE}/admin/validation-rules?${params}`);
+            set({ validationRules: data, validationLoading: false });
+        } catch (error) {
+            console.error('Failed to load validation rules:', error);
+            set({ validationLoading: false });
+        }
+    },
+
+    async createValidationRule(ruleData) {
+        try {
+            const response = await fetch(`${API_BASE}/admin/validation-rules`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(ruleData),
+            });
+            if (!response.ok) throw new Error('Failed to create validation rule');
+            await get().loadValidationRules();
+            return true;
+        } catch (error) {
+            console.error('Failed to create validation rule:', error);
+            throw error;
+        }
+    },
+
+    async deleteValidationRule(ruleId) {
+        try {
+            const response = await fetch(`${API_BASE}/admin/validation-rules/${ruleId}`, {
+                method: 'DELETE',
+            });
+            if (!response.ok) throw new Error('Failed to delete validation rule');
+            await get().loadValidationRules();
+            return true;
+        } catch (error) {
+            console.error('Failed to delete validation rule:', error);
+            throw error;
+        }
+    },
+
+    async loadDataQualityViolations(machineId, hours = 24, severity) {
+        try {
+            const params = new URLSearchParams();
+            params.append('hours', hours);
+            if (severity) params.append('severity', severity);
+
+            const data = await fetchJson(
+                `${API_BASE}/machines/${machineId}/data-quality?${params}`
+            );
+            set({ dataQualityViolations: data.violations || [] });
+        } catch (error) {
+            console.error('Failed to load data quality violations:', error);
+        }
+    },
 }));

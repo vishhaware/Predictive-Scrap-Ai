@@ -277,6 +277,57 @@ class AutoTrainConfigRequest(BaseModel):
     auto_promote: Optional[bool] = None
     run_immediately: Optional[bool] = False
 
+
+# --- Parameter Management Models ---
+class ParameterConfigUpdate(BaseModel):
+    parameter_name: str
+    machine_id: Optional[str] = None
+    part_number: Optional[str] = None
+    tolerance_plus: float
+    tolerance_minus: float
+    default_set_value: float
+    reason: Optional[str] = None
+
+
+class ParameterConfigResponse(BaseModel):
+    id: int
+    parameter_name: str
+    machine_id: Optional[str]
+    part_number: Optional[str]
+    tolerance_plus: float
+    tolerance_minus: float
+    default_set_value: float
+    source: str
+    csv_original_plus: Optional[float]
+    csv_original_minus: Optional[float]
+    statistical_bounds: Optional[Dict[str, float]]
+    updated_at: str
+    changed_by: Optional[str]
+
+
+# --- Validation Rule Models ---
+class ValidationRuleCreate(BaseModel):
+    sensor_name: str
+    machine_id: Optional[str] = None
+    rule_type: str  # RANGE | OUTLIER | COMPLETENESS | DRIFT
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    zscore_threshold: Optional[float] = 3.0
+    drift_method: Optional[str] = None
+    drift_threshold: Optional[float] = None
+    baseline_window_cycles: Optional[int] = None
+    severity: str = "WARNING"
+
+
+class ValidationRuleResponse(BaseModel):
+    id: int
+    sensor_name: str
+    machine_id: Optional[str]
+    rule_type: str
+    severity: str
+    enabled: bool
+    created_at: str
+
 # Startup time
 STARTUP_TIME = time.time()
 MODEL_JOBS: Dict[str, Dict[str, Any]] = {}
@@ -4801,3 +4852,387 @@ async def get_predict_dashboard(
         "past_history": past_history,
         "future_forecast": future_forecast
     }
+
+
+# ==================== PARAMETER MANAGEMENT ENDPOINTS ====================
+
+@app.get("/api/admin/parameters", response_model=List[ParameterConfigResponse])
+@database.with_reconnect(max_retries=3)
+def list_parameters(
+    machine_id: Optional[str] = None,
+    parameter_name: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List all parameter configurations with optional filtering."""
+    query = db.query(models.ParameterConfig)
+
+    if machine_id:
+        query = query.filter(models.ParameterConfig.machine_id == machine_id)
+
+    if parameter_name:
+        query = query.filter(models.ParameterConfig.parameter_name.ilike(f"%{parameter_name}%"))
+
+    configs = query.order_by(models.ParameterConfig.updated_at.desc()).all()
+
+    result = []
+    for cfg in configs:
+        result.append(ParameterConfigResponse(
+            id=cfg.id,
+            parameter_name=cfg.parameter_name,
+            machine_id=cfg.machine_id,
+            part_number=cfg.part_number,
+            tolerance_plus=cfg.tolerance_plus,
+            tolerance_minus=cfg.tolerance_minus,
+            default_set_value=cfg.default_set_value,
+            source=cfg.source,
+            csv_original_plus=cfg.csv_original_plus,
+            csv_original_minus=cfg.csv_original_minus,
+            statistical_bounds=None,  # TODO: Calculate from historical data
+            updated_at=cfg.updated_at.isoformat() if cfg.updated_at else None,
+            changed_by=cfg.created_by
+        ))
+
+    return result
+
+
+@app.post("/api/admin/parameters", response_model=ParameterConfigResponse)
+@database.with_reconnect(max_retries=3)
+def create_update_parameter(
+    request: ParameterConfigUpdate,
+    edited_by: str = "system",
+    db: Session = Depends(get_db)
+):
+    """Create or update a parameter configuration."""
+    # Check for existing config
+    existing = db.query(models.ParameterConfig).filter(
+        and_(
+            models.ParameterConfig.parameter_name == request.parameter_name,
+            models.ParameterConfig.machine_id == request.machine_id,
+            models.ParameterConfig.part_number == request.part_number
+        )
+    ).first()
+
+    if existing:
+        # Save old values to history
+        old_values = {
+            'tolerance_plus': existing.tolerance_plus,
+            'tolerance_minus': existing.tolerance_minus,
+            'default_set_value': existing.default_set_value
+        }
+
+        new_values = {
+            'tolerance_plus': request.tolerance_plus,
+            'tolerance_minus': request.tolerance_minus,
+            'default_set_value': request.default_set_value
+        }
+
+        # Record history
+        history = models.ParameterEditHistory(
+            config_id=existing.id,
+            old_values=old_values,
+            new_values=new_values,
+            edited_by=edited_by,
+            reason=request.reason
+        )
+
+        # Update config
+        existing.tolerance_plus = request.tolerance_plus
+        existing.tolerance_minus = request.tolerance_minus
+        existing.default_set_value = request.default_set_value
+        existing.source = "USER"
+        existing.updated_at = datetime.now(timezone.utc)
+        existing.created_by = edited_by
+
+        db.add(history)
+        db.add(existing)
+        db.commit()
+
+        return ParameterConfigResponse(
+            id=existing.id,
+            parameter_name=existing.parameter_name,
+            machine_id=existing.machine_id,
+            part_number=existing.part_number,
+            tolerance_plus=existing.tolerance_plus,
+            tolerance_minus=existing.tolerance_minus,
+            default_set_value=existing.default_set_value,
+            source=existing.source,
+            csv_original_plus=existing.csv_original_plus,
+            csv_original_minus=existing.csv_original_minus,
+            statistical_bounds=None,
+            updated_at=existing.updated_at.isoformat() if existing.updated_at else None,
+            changed_by=existing.created_by
+        )
+    else:
+        # Create new config
+        new_config = models.ParameterConfig(
+            parameter_name=request.parameter_name,
+            machine_id=request.machine_id,
+            part_number=request.part_number,
+            tolerance_plus=request.tolerance_plus,
+            tolerance_minus=request.tolerance_minus,
+            default_set_value=request.default_set_value,
+            source="USER",
+            created_by=edited_by,
+            updated_at=datetime.now(timezone.utc)
+        )
+
+        db.add(new_config)
+        db.commit()
+        db.refresh(new_config)
+
+        return ParameterConfigResponse(
+            id=new_config.id,
+            parameter_name=new_config.parameter_name,
+            machine_id=new_config.machine_id,
+            part_number=new_config.part_number,
+            tolerance_plus=new_config.tolerance_plus,
+            tolerance_minus=new_config.tolerance_minus,
+            default_set_value=new_config.default_set_value,
+            source=new_config.source,
+            csv_original_plus=new_config.csv_original_plus,
+            csv_original_minus=new_config.csv_original_minus,
+            statistical_bounds=None,
+            updated_at=new_config.updated_at.isoformat() if new_config.updated_at else None,
+            changed_by=new_config.created_by
+        )
+
+
+@app.get("/api/admin/parameters/{param_id}", response_model=ParameterConfigResponse)
+@database.with_reconnect(max_retries=3)
+def get_parameter(
+    param_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get a specific parameter configuration."""
+    config = db.query(models.ParameterConfig).filter(models.ParameterConfig.id == param_id).first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+
+    return ParameterConfigResponse(
+        id=config.id,
+        parameter_name=config.parameter_name,
+        machine_id=config.machine_id,
+        part_number=config.part_number,
+        tolerance_plus=config.tolerance_plus,
+        tolerance_minus=config.tolerance_minus,
+        default_set_value=config.default_set_value,
+        source=config.source,
+        csv_original_plus=config.csv_original_plus,
+        csv_original_minus=config.csv_original_minus,
+        statistical_bounds=None,
+        updated_at=config.updated_at.isoformat() if config.updated_at else None,
+        changed_by=config.created_by
+    )
+
+
+@app.post("/api/admin/parameters/{config_id}/revert")
+@database.with_reconnect(max_retries=3)
+def revert_parameter_to_csv(
+    config_id: int,
+    db: Session = Depends(get_db)
+):
+    """Revert a parameter to its CSV default values."""
+    config = db.query(models.ParameterConfig).filter(models.ParameterConfig.id == config_id).first()
+
+    if not config:
+        raise HTTPException(status_code=404, detail="Parameter not found")
+
+    # Save history
+    old_values = {
+        'tolerance_plus': config.tolerance_plus,
+        'tolerance_minus': config.tolerance_minus,
+        'default_set_value': config.default_set_value
+    }
+
+    new_values = {
+        'tolerance_plus': config.csv_original_plus,
+        'tolerance_minus': config.csv_original_minus,
+        'default_set_value': config.default_set_value  # Setpoint doesn't revert
+    }
+
+    # Record history
+    history = models.ParameterEditHistory(
+        config_id=config.id,
+        old_values=old_values,
+        new_values=new_values,
+        edited_by="system",
+        reason="Reverted to CSV default"
+    )
+
+    # Update config
+    config.tolerance_plus = config.csv_original_plus
+    config.tolerance_minus = config.csv_original_minus
+    config.source = "CSV"
+    config.updated_at = datetime.now(timezone.utc)
+
+    db.add(history)
+    db.add(config)
+    db.commit()
+
+    return {"ok": True, "message": f"Parameter {config.parameter_name} reverted to CSV defaults"}
+
+
+@app.get("/api/admin/parameter-history")
+@database.with_reconnect(max_retries=3)
+def get_parameter_history(
+    parameter_name: Optional[str] = None,
+    limit: int = 100,
+    db: Session = Depends(get_db)
+):
+    """Get parameter edit history with optional filtering."""
+    query = db.query(models.ParameterEditHistory)
+
+    if parameter_name:
+        query = query.join(models.ParameterConfig).filter(
+            models.ParameterConfig.parameter_name == parameter_name
+        )
+
+    history = query.order_by(models.ParameterEditHistory.edited_at.desc()).limit(limit).all()
+
+    return [
+        {
+            "id": h.id,
+            "parameter_name": h.config.parameter_name if h.config else None,
+            "old_values": h.old_values,
+            "new_values": h.new_values,
+            "edited_by": h.edited_by,
+            "edited_at": h.edited_at.isoformat() if h.edited_at else None,
+            "reason": h.reason
+        }
+        for h in history
+    ]
+
+
+# ==================== VALIDATION RULE ENDPOINTS ====================
+
+@app.get("/api/admin/validation-rules", response_model=List[ValidationRuleResponse])
+@database.with_reconnect(max_retries=3)
+def list_validation_rules(
+    sensor_name: Optional[str] = None,
+    machine_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """List all validation rules."""
+    query = db.query(models.ValidationRule)
+
+    if sensor_name:
+        query = query.filter(models.ValidationRule.sensor_name == sensor_name)
+
+    if machine_id:
+        query = query.filter(models.ValidationRule.machine_id == machine_id)
+
+    rules = query.order_by(models.ValidationRule.created_at.desc()).all()
+
+    return [
+        ValidationRuleResponse(
+            id=r.id,
+            sensor_name=r.sensor_name,
+            machine_id=r.machine_id,
+            rule_type=r.rule_type,
+            severity=r.severity,
+            enabled=bool(r.enabled),
+            created_at=r.created_at.isoformat() if r.created_at else None
+        )
+        for r in rules
+    ]
+
+
+@app.post("/api/admin/validation-rules", response_model=ValidationRuleResponse)
+@database.with_reconnect(max_retries=3)
+def create_validation_rule(
+    request: ValidationRuleCreate,
+    created_by: str = "system",
+    db: Session = Depends(get_db)
+):
+    """Create a new validation rule."""
+    rule = models.ValidationRule(
+        sensor_name=request.sensor_name,
+        machine_id=request.machine_id,
+        rule_type=request.rule_type,
+        min_value=request.min_value,
+        max_value=request.max_value,
+        zscore_threshold=request.zscore_threshold,
+        drift_method=request.drift_method,
+        drift_threshold=request.drift_threshold,
+        baseline_window_cycles=request.baseline_window_cycles,
+        severity=request.severity,
+        created_by=created_by
+    )
+
+    db.add(rule)
+    db.commit()
+    db.refresh(rule)
+
+    return ValidationRuleResponse(
+        id=rule.id,
+        sensor_name=rule.sensor_name,
+        machine_id=rule.machine_id,
+        rule_type=rule.rule_type,
+        severity=rule.severity,
+        enabled=bool(rule.enabled),
+        created_at=rule.created_at.isoformat() if rule.created_at else None
+    )
+
+
+@app.delete("/api/admin/validation-rules/{rule_id}")
+@database.with_reconnect(max_retries=3)
+def delete_validation_rule(
+    rule_id: int,
+    db: Session = Depends(get_db)
+):
+    """Delete a validation rule."""
+    rule = db.query(models.ValidationRule).filter(models.ValidationRule.id == rule_id).first()
+
+    if not rule:
+        raise HTTPException(status_code=404, detail="Validation rule not found")
+
+    db.delete(rule)
+    db.commit()
+
+    return {"ok": True, "message": f"Validation rule {rule_id} deleted"}
+
+
+@app.get("/api/machines/{machine_id}/data-quality")
+@database.with_reconnect(max_retries=3)
+def get_data_quality_violations(
+    machine_id: str,
+    hours: int = 24,
+    severity: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Get recent data quality violations for a machine."""
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    query = db.query(models.DataQualityViolation).filter(
+        models.DataQualityViolation.flagged_at >= cutoff_time
+    )
+
+    if severity:
+        query = query.filter(models.DataQualityViolation.severity == severity)
+
+    violations = query.order_by(models.DataQualityViolation.flagged_at.desc()).all()
+
+    # Group by type for summary
+    summary = {
+        'violations_recent': len(violations),
+        'critical_count': len([v for v in violations if v.severity == 'CRITICAL']),
+        'warning_count': len([v for v in violations if v.severity == 'WARNING'])
+    }
+
+    return {
+        "summary": summary,
+        "violations": [
+            {
+                "id": v.id,
+                "sensor": v.sensor_name,
+                "type": v.violation_type,
+                "severity": v.severity,
+                "details": v.violation_details,
+                "flagged_at": v.flagged_at.isoformat() if v.flagged_at else None,
+                "resolved_at": v.resolved_at.isoformat() if v.resolved_at else None
+            }
+            for v in violations
+        ]
+    }
+

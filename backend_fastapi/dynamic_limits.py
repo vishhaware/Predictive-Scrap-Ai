@@ -1,7 +1,8 @@
 import logging
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
@@ -108,6 +109,80 @@ def _resolve_sensor_rule(sensor_name: str, part_number: Optional[str]) -> tuple[
         return rule, "global_csv"
 
     return {}, "dynamic"
+
+
+def _load_user_parameter_overrides(
+    session: Any,  # SQLAlchemy Session
+    sensor_name: str,
+    machine_id: Optional[str] = None,
+    part_number: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """
+    Load user-configured parameter overrides from the database.
+
+    Checks parameter_configs table first for:
+    1. Machine-specific + part-specific override
+    2. Machine-specific + global override
+    3. Global override
+
+    Returns None if no override found (falls back to CSV).
+    """
+    if not session:
+        return None
+
+    try:
+        from . import models
+    except ImportError:
+        import models
+
+    # Try part-specific override
+    if machine_id and part_number:
+        override = session.query(models.ParameterConfig).filter(
+            models.ParameterConfig.parameter_name == sensor_name,
+            models.ParameterConfig.machine_id == machine_id,
+            models.ParameterConfig.part_number == _normalize_part_number(part_number),
+            models.ParameterConfig.is_active == 1
+        ).first()
+        if override:
+            return {
+                "plus": override.tolerance_plus,
+                "minus": override.tolerance_minus,
+                "setpoint": override.default_set_value,
+                "source": "user_override"
+            }
+
+    # Try machine-specific override
+    if machine_id:
+        override = session.query(models.ParameterConfig).filter(
+            models.ParameterConfig.parameter_name == sensor_name,
+            models.ParameterConfig.machine_id == machine_id,
+            models.ParameterConfig.part_number.is_(None),
+            models.ParameterConfig.is_active == 1
+        ).first()
+        if override:
+            return {
+                "plus": override.tolerance_plus,
+                "minus": override.tolerance_minus,
+                "setpoint": override.default_set_value,
+                "source": "user_override"
+            }
+
+    # Try global override
+    override = session.query(models.ParameterConfig).filter(
+        models.ParameterConfig.parameter_name == sensor_name,
+        models.ParameterConfig.machine_id.is_(None),
+        models.ParameterConfig.part_number.is_(None),
+        models.ParameterConfig.is_active == 1
+    ).first()
+    if override:
+        return {
+            "plus": override.tolerance_plus,
+            "minus": override.tolerance_minus,
+            "setpoint": override.default_set_value,
+            "source": "user_override"
+        }
+
+    return None
 
 
 def calculate_dynamic_limits(
