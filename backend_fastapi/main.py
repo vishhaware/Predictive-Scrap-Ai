@@ -4924,6 +4924,12 @@ def create_update_parameter(
             'default_set_value': existing.default_set_value
         }
 
+        # Ensure CSV baseline exists for configs created purely through API.
+        if existing.csv_original_plus is None:
+            existing.csv_original_plus = existing.tolerance_plus
+        if existing.csv_original_minus is None:
+            existing.csv_original_minus = existing.tolerance_minus
+
         new_values = {
             'tolerance_plus': request.tolerance_plus,
             'tolerance_minus': request.tolerance_minus,
@@ -4975,6 +4981,8 @@ def create_update_parameter(
             tolerance_plus=request.tolerance_plus,
             tolerance_minus=request.tolerance_minus,
             default_set_value=request.default_set_value,
+            csv_original_plus=request.tolerance_plus,
+            csv_original_minus=request.tolerance_minus,
             source="USER",
             created_by=edited_by,
             updated_at=datetime.now(timezone.utc)
@@ -5556,4 +5564,3 @@ def trigger_metrics_computation(
             "status": "error",
             "message": str(e)
         }
-

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, JSON, ForeignKey, DateTime, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, JSON, ForeignKey, DateTime, UniqueConstraint, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 import datetime
@@ -18,13 +18,14 @@ class Cycle(Base):
 
     __table_args__ = (
         UniqueConstraint('machine_id', 'timestamp', name='_machine_timestamp_uc'),
+        Index('idx_cycle_machine_timestamp', 'machine_id', 'timestamp'),
     )
 
 class Prediction(Base):
     __tablename__ = "predictions"
 
     id = Column(Integer, primary_key=True, index=True)
-    cycle_id = Column(Integer, ForeignKey("cycles.id"))
+    cycle_id = Column(Integer, ForeignKey("cycles.id"), index=True)
     scrap_probability = Column(Float)
     confidence = Column(Float)
     risk_level = Column(String)
@@ -138,10 +139,13 @@ class ModelPerformanceMetrics(Base):
     prediction_uncertainty_mean = Column(Float)
     prediction_uncertainty_std = Column(Float)
 
-    metadata = Column(JSON)  # JSON: feature_importance, calibration_curve, etc
+    # Keep DB column name "metadata" for compatibility, but avoid reserved
+    # declarative attribute name on the ORM class.
+    metrics_metadata = Column("metadata", JSON)  # JSON: feature_importance, calibration_curve, etc
 
     __table_args__ = (
         UniqueConstraint('model_id', 'machine_id', 'window_duration_hours', 'evaluated_at', name='_perf_metrics_uc'),
+        Index('idx_perf_metrics_model_machine_time', 'model_id', 'machine_id', 'evaluated_at'),
     )
 
 

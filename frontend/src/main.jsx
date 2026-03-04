@@ -1,5 +1,6 @@
 import React, { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ChakraProvider } from '@chakra-ui/react';
 import './index.css';
 
 const rootElement = document.getElementById('root');
@@ -110,14 +111,10 @@ window.addEventListener('unhandledrejection', (event) => {
 async function boot() {
   try {
     const { default: App } = await import('./App.jsx');
+    const appContent = <App />;
+    const appWithProviders = <ChakraProvider>{appContent}</ChakraProvider>;
     const isDev = import.meta.env.DEV;
-    const appTree = isDev ? (
-      <App />
-    ) : (
-      <StrictMode>
-        <App />
-      </StrictMode>
-    );
+    const appTree = isDev ? appWithProviders : <StrictMode>{appWithProviders}</StrictMode>;
 
     root.render(<RootErrorBoundary>{appTree}</RootErrorBoundary>);
   } catch (error) {

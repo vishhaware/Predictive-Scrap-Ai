@@ -131,10 +131,20 @@ function Wait-HttpReady {
         [string]$Url,
         [int]$Attempts = 40,
         [int]$DelaySeconds = 2,
-        [switch]$AllowAny2xx
+        [switch]$AllowAny2xx,
+        [System.Diagnostics.Process]$AbortIfProcessExited
     )
 
     for ($i = 1; $i -le $Attempts; $i++) {
+        if ($AbortIfProcessExited) {
+            try {
+                $AbortIfProcessExited.Refresh()
+                if ($AbortIfProcessExited.HasExited) {
+                    return $false
+                }
+            }
+            catch {}
+        }
         try {
             if ($AllowAny2xx) {
                 $response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
@@ -155,6 +165,15 @@ function Wait-HttpReady {
             }
         }
         catch {}
+        if ($AbortIfProcessExited) {
+            try {
+                $AbortIfProcessExited.Refresh()
+                if ($AbortIfProcessExited.HasExited) {
+                    return $false
+                }
+            }
+            catch {}
+        }
         Start-Sleep -Seconds $DelaySeconds
     }
     return $false
@@ -201,6 +220,53 @@ function Invoke-JsonGetWithRetry {
     }
     if ($lastError) { throw $lastError }
     throw "Failed to fetch $Url"
+}
+
+function Show-LogTail {
+    param(
+        [string]$Path,
+        [int]$Lines = 40,
+        [string]$Label = "process log"
+    )
+    if (-not (Test-Path $Path)) { return }
+    Write-Host ""
+    Write-Host "$Label ($Path)" -ForegroundColor DarkGray
+    try {
+        Get-Content -Path $Path -Tail $Lines -ErrorAction Stop | ForEach-Object {
+            Write-Host "  $_" -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Step "[WARN] Could not read $Label at ${Path}: $($_.Exception.Message)" Yellow
+    }
+}
+
+function Start-ShellCommandProcess {
+    param(
+        [Parameter(Mandatory = $true)][string]$WorkingDir,
+        [Parameter(Mandatory = $true)][string]$Command,
+        [Parameter(Mandatory = $true)][string]$StdOutPath,
+        [Parameter(Mandatory = $true)][string]$StdErrPath
+    )
+    New-Item -ItemType File -Force -Path $StdOutPath | Out-Null
+    New-Item -ItemType File -Force -Path $StdErrPath | Out-Null
+    $wrapped = @"
+Set-Location -LiteralPath '$WorkingDir'
+$Command
+"@
+    return Start-Process -FilePath "powershell" -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", $wrapped) -RedirectStandardOutput $StdOutPath -RedirectStandardError $StdErrPath -PassThru
+}
+
+function Get-ProcessExitCodeText {
+    param([System.Diagnostics.Process]$Process)
+    if (-not $Process) { return "unknown" }
+    try { $Process.Refresh() } catch {}
+    $code = $null
+    try { $code = $Process.ExitCode } catch {}
+    if ($null -eq $code) { return "unknown" }
+    $text = [string]$code
+    if ([string]::IsNullOrWhiteSpace($text)) { return "unknown" }
+    return $text
 }
 
 function Stop-ProcessSafe {
@@ -486,6 +552,10 @@ $backendUrl = "http://$backendHost`:$resolvedBackendPort"
 $backendWsUrl = "ws://$backendHost`:$resolvedBackendPort"
 $resolvedFrontendPort = $FrontendPort
 $dashboardUrl = "http://$frontendHost`:$resolvedFrontendPort"
+$backendStdOutLog = Join-Path $runtimeDir "backend.stdout.log"
+$backendStdErrLog = Join-Path $runtimeDir "backend.stderr.log"
+$frontendStdOutLog = Join-Path $runtimeDir "frontend.stdout.log"
+$frontendStdErrLog = Join-Path $runtimeDir "frontend.stderr.log"
 
 $backendProc = $null
 $frontendProc = $null
@@ -578,21 +648,32 @@ try {
 
     Write-Step "`n[2/5] Starting FastAPI backend..."
 $backendCommand = @"
-Set-Location -LiteralPath '$backendDir'
 `$env:PYTHONUNBUFFERED='1'
 `$env:DATA_DIR='$dataDir'
 `$env:MES_WORKBOOK_PATH='$mesWorkbookPath'
 & '$pythonExe' -m uvicorn main:app --host $backendHost --port $resolvedBackendPort
 "@
-    $backendProc = Start-Process -FilePath "powershell" -ArgumentList @("-NoExit", "-Command", $backendCommand) -PassThru
+    $backendProc = Start-ShellCommandProcess -WorkingDir $backendDir -Command $backendCommand -StdOutPath $backendStdOutLog -StdErrPath $backendStdErrLog
     Start-Sleep -Milliseconds 500
     if ($backendProc.HasExited) {
-        throw "Backend process exited immediately with code $($backendProc.ExitCode)."
+        $backendExit = Get-ProcessExitCodeText -Process $backendProc
+        Show-LogTail -Path $backendStdErrLog -Label "Backend stderr"
+        Show-LogTail -Path $backendStdOutLog -Label "Backend stdout"
+        throw "Backend process exited immediately with code $backendExit."
     }
 
     Write-Step "[3/5] Waiting for backend health ($backendUrl/api/health)..."
-    $backendReady = Wait-HttpReady -Url "$backendUrl/api/health" -Attempts 50 -DelaySeconds 2
+    $backendReady = Wait-HttpReady -Url "$backendUrl/api/health" -Attempts 50 -DelaySeconds 2 -AbortIfProcessExited $backendProc
     if (-not $backendReady) {
+        $backendProc.Refresh()
+        if ($backendProc.HasExited) {
+            $backendExit = Get-ProcessExitCodeText -Process $backendProc
+            Show-LogTail -Path $backendStdErrLog -Label "Backend stderr"
+            Show-LogTail -Path $backendStdOutLog -Label "Backend stdout"
+            throw "Backend process exited during startup with code $backendExit."
+        }
+        Show-LogTail -Path $backendStdErrLog -Label "Backend stderr"
+        Show-LogTail -Path $backendStdOutLog -Label "Backend stdout"
         throw "Backend health check timed out. Check backend terminal logs."
     }
     Write-Step "Backend is healthy." Green
@@ -650,23 +731,28 @@ Set-Location -LiteralPath '$backendDir'
         Write-Step "[INFO] Frontend port $FrontendPort is busy. Using $resolvedFrontendPort instead." Yellow
     }
     $frontendCommand = @"
-Set-Location -LiteralPath '$frontendDir'
 `$env:VITE_BACKEND_URL='$backendUrl'
 `$env:VITE_BACKEND_WS_URL='$backendWsUrl'
 `$env:VITE_ENABLE_WS_PROXY='true'
 npm run dev -- --host $frontendHost --port $resolvedFrontendPort --strictPort
 "@
-    $frontendProc = Start-Process -FilePath "powershell" -ArgumentList @("-NoExit", "-Command", $frontendCommand) -PassThru
+    $frontendProc = Start-ShellCommandProcess -WorkingDir $frontendDir -Command $frontendCommand -StdOutPath $frontendStdOutLog -StdErrPath $frontendStdErrLog
     Start-Sleep -Milliseconds 500
     if ($frontendProc.HasExited) {
-        throw "Frontend process exited immediately with code $($frontendProc.ExitCode)."
+        $frontendExit = Get-ProcessExitCodeText -Process $frontendProc
+        Show-LogTail -Path $frontendStdErrLog -Label "Frontend stderr"
+        Show-LogTail -Path $frontendStdOutLog -Label "Frontend stdout"
+        throw "Frontend process exited immediately with code $frontendExit."
     }
 
     Write-Step "[5/5] Waiting for frontend readiness ($dashboardUrl)..."
-    $frontendReady = Wait-HttpReady -Url $dashboardUrl -Attempts 40 -DelaySeconds 1 -AllowAny2xx
+    $frontendReady = Wait-HttpReady -Url $dashboardUrl -Attempts 40 -DelaySeconds 1 -AllowAny2xx -AbortIfProcessExited $frontendProc
     $frontendProc.Refresh()
     if ($frontendProc.HasExited) {
-        throw "Frontend process exited before readiness probe completed (code $($frontendProc.ExitCode)). Check frontend terminal output."
+        $frontendExit = Get-ProcessExitCodeText -Process $frontendProc
+        Show-LogTail -Path $frontendStdErrLog -Label "Frontend stderr"
+        Show-LogTail -Path $frontendStdOutLog -Label "Frontend stdout"
+        throw "Frontend process exited before readiness probe completed (code $frontendExit). Check frontend terminal output."
     }
     if (-not $frontendReady) {
         Write-Step "[WARN] Frontend readiness probe timed out. It may still be compiling; check frontend terminal." Yellow
@@ -708,6 +794,8 @@ npm run dev -- --host $frontendHost --port $resolvedFrontendPort --strictPort
     Write-Host "Dashboard : $dashboardUrl" -ForegroundColor White
     Write-Host "API Docs  : $backendUrl/docs" -ForegroundColor White
     Write-Host "Health    : $backendUrl/api/health" -ForegroundColor White
+    Write-Host "Backend logs : $backendStdOutLog | $backendStdErrLog" -ForegroundColor DarkGray
+    Write-Host "Frontend logs: $frontendStdOutLog | $frontendStdErrLog" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "Quick checks:" -ForegroundColor DarkGray
     Write-Host "  curl.exe -sS $backendUrl/api/health" -ForegroundColor DarkGray
