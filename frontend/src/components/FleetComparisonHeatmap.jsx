@@ -12,6 +12,7 @@ import {
   CardBody,
 } from '@chakra-ui/react';
 import { useTelemetryStore } from '../store/useTelemetryStore';
+import { toFixedSafe, toNumberOr } from '../utils/number';
 
 /**
  * FleetComparisonHeatmap - Machine x Metrics heatmap
@@ -92,8 +93,8 @@ export default function FleetComparisonHeatmap() {
   // Create hover text
   const hoverText = fleetMachines.map((machine, i) =>
     metrics.map((metric, j) => {
-      const value = values[i][j];
-      return `<b>${machine.name}</b><br><b>${metric.label}</b><br>Value: ${value.toFixed(1)}%`;
+      const value = toNumberOr(values?.[i]?.[j], 0);
+      return `<b>${machine.name}</b><br><b>${metric.label}</b><br>Value: ${toFixedSafe(value, 1, '0.0')}%`;
     })
   );
 
@@ -191,7 +192,7 @@ export default function FleetComparisonHeatmap() {
                       {machine.id}
                     </td>
                     {heatmapData.metrics.map((_, j) => {
-                      const value = heatmapData.values[i][j];
+                      const value = toNumberOr(heatmapData.values?.[i]?.[j], 0);
                       const bgColor =
                         value >= 80
                           ? '#dcfce7'
@@ -209,7 +210,7 @@ export default function FleetComparisonHeatmap() {
                             fontWeight: '500',
                           }}
                         >
-                          {value.toFixed(1)}%
+                          {toFixedSafe(value, 1, '0.0')}%
                         </td>
                       );
                     })}

@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import { useTelemetryStore } from '../store/useTelemetryStore';
+import { toFixedSafe } from '../utils/number';
 import { t } from '../utils/i18n';
 import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -175,7 +176,7 @@ export default function ManagerView() {
                                     <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
                                     <Tooltip
                                         contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border-default)', borderRadius: 10, fontSize: 12, boxShadow: 'var(--shadow-card)' }}
-                                        formatter={(value, name) => [`${Number(value || 0).toFixed(2)}%`, name]}
+                                        formatter={(value, name) => [`${toFixedSafe(value, 2, '0.00')}%`, name]}
                                         labelFormatter={(label) => new Date(label).toLocaleString()}
                                     />
                                     <Legend wrapperStyle={{ fontSize: 11 }} />
@@ -195,7 +196,7 @@ export default function ManagerView() {
                                 <div key={row.machine_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', borderRadius: 8, background: 'var(--bg-elevated)', fontSize: 12 }}>
                                     <span style={{ fontWeight: 700 }}>{row.machine_id}</span>
                                     <span style={{ color: 'var(--status-crit)', fontFamily: 'JetBrains Mono, monospace' }}>
-                                        {(Number(row.future_peak_scrap_prob || 0) * 100).toFixed(1)}%
+                                        {toFixedSafe(Number(row.future_peak_scrap_prob || 0) * 100, 1, '0.0')}%
                                     </span>
                                 </div>
                             ))}
@@ -232,7 +233,7 @@ export default function ManagerView() {
                 </div>
                 <div className="stat-card ok">
                     <div className="stat-label">Prediction Confidence</div>
-                    <div className="stat-value" style={{ color: 'var(--status-ok)' }}>{predictionConfidence.toFixed(1)}<span className="stat-unit">%</span></div>
+                    <div className="stat-value" style={{ color: 'var(--status-ok)' }}>{toFixedSafe(predictionConfidence, 1, '0.0')}<span className="stat-unit">%</span></div>
                     <div className="stat-delta positive" style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
                         <Award size={12} />{brierLabel}
                     </div>
@@ -275,7 +276,7 @@ export default function ManagerView() {
                                 <div>
                                     <div style={{ fontSize: 9, color: 'var(--text-muted)', textTransform: 'uppercase' }}>{m.id === 'M231-11' ? 'Cushion' : 'Temp'}</div>
                                     <div style={{ fontSize: 18, fontWeight: 800, color: 'var(--text-primary)', fontFamily: 'JetBrains Mono, monospace' }}>
-                                        {m.id === 'M231-11' ? (m.cushion?.toFixed(2) || '---') : m.temp + '°'}
+                                        {m.id === 'M231-11' ? toFixedSafe(m.cushion, 2, '---') : `${m.temp}°`}
                                     </div>
                                 </div>
                             </div>
@@ -360,7 +361,7 @@ export default function ManagerView() {
                                 <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={v => `${v}%`} />
                                 <Tooltip
                                     contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border-default)', borderRadius: 10, fontSize: 12, boxShadow: 'var(--shadow-card)' }}
-                                    formatter={(v) => [`${v.toFixed(1)}%`, 'Scrap Risk']}
+                                    formatter={(v) => [`${toFixedSafe(v, 1, '0.0')}%`, 'Scrap Risk']}
                                 />
                                 <Line dataKey="prob" name="Fleet Probability" stroke="var(--status-crit)" strokeWidth={3} dot={false} animationDuration={300} />
                             </LineChart>

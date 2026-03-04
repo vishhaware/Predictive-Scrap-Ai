@@ -16,6 +16,7 @@ import {
   Badge,
 } from '@chakra-ui/react';
 import { useTelemetryStore } from '../store/useTelemetryStore';
+import { toFixedSafe } from '../utils/number';
 
 /**
  * ModelComparisonScatter - 2D scatter plot of two models' predictions
@@ -128,7 +129,7 @@ export default function ModelComparisonScatter({ machineId = null }) {
 
   const totalData = scrapData.length + goodData.length + uncertainData.length;
   const agreementRate =
-    ((quadrants.agree_scrap + quadrants.agree_good) / totalData * 100).toFixed(1);
+    toFixedSafe(((quadrants.agree_scrap + quadrants.agree_good) / Math.max(1, totalData)) * 100, 1, '0.0');
 
   const plotlyData = [
     // Scrap events (red)
@@ -144,7 +145,7 @@ export default function ModelComparisonScatter({ machineId = null }) {
       },
       text: scrapData.map(
         (d) =>
-          `<b>Scrap Event</b><br>${modelA}: ${d.model_a_prediction.toFixed(3)}<br>${modelB}: ${d.model_b_prediction.toFixed(3)}<br>Confidence: ${d.confidence.toFixed(3)}`
+          `<b>Scrap Event</b><br>${modelA}: ${toFixedSafe(d.model_a_prediction, 3, 'N/A')}<br>${modelB}: ${toFixedSafe(d.model_b_prediction, 3, 'N/A')}<br>Confidence: ${toFixedSafe(d.confidence, 3, 'N/A')}`
       ),
       hovertemplate: '%{text}<extra></extra>',
       name: 'Scrap Events',
@@ -163,7 +164,7 @@ export default function ModelComparisonScatter({ machineId = null }) {
       },
       text: goodData.map(
         (d) =>
-          `<b>Good Product</b><br>${modelA}: ${d.model_a_prediction.toFixed(3)}<br>${modelB}: ${d.model_b_prediction.toFixed(3)}<br>Confidence: ${d.confidence.toFixed(3)}`
+          `<b>Good Product</b><br>${modelA}: ${toFixedSafe(d.model_a_prediction, 3, 'N/A')}<br>${modelB}: ${toFixedSafe(d.model_b_prediction, 3, 'N/A')}<br>Confidence: ${toFixedSafe(d.confidence, 3, 'N/A')}`
       ),
       hovertemplate: '%{text}<extra></extra>',
       name: 'Good Products',
@@ -209,7 +210,7 @@ export default function ModelComparisonScatter({ machineId = null }) {
       },
       text: uncertainData.map(
         (d) =>
-          `${modelA}: ${d.model_a_prediction.toFixed(3)}<br>${modelB}: ${d.model_b_prediction.toFixed(3)}`
+          `${modelA}: ${toFixedSafe(d.model_a_prediction, 3, 'N/A')}<br>${modelB}: ${toFixedSafe(d.model_b_prediction, 3, 'N/A')}`
       ),
       hovertemplate: '%{text}<extra></extra>',
       name: 'Untagged Data',

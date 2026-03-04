@@ -46,6 +46,7 @@ import {
 import { useTelemetryStore } from '../store/useTelemetryStore';
 import ValidationRulesEditor from '../components/ValidationRulesEditor';
 import DriftDetectionChart from '../components/DriftDetectionChart';
+import { toFiniteOrNull, toFixedSafe } from '../utils/number';
 
 /**
  * DataQualityView - Comprehensive data quality monitoring dashboard
@@ -295,6 +296,9 @@ export default function DataQualityView() {
                       <Tbody>
                         {sortedViolations.map((v) => {
                           const details = typeof v.details === 'string' ? JSON.parse(v.details) : v.details;
+                          const detailValue = toFiniteOrNull(details?.value);
+                          const detailMin = toFiniteOrNull(details?.min);
+                          const detailMax = toFiniteOrNull(details?.max);
                           return (
                             <Tr key={v.id}>
                               <Td fontWeight="bold">{v.machine_id}</Td>
@@ -310,12 +314,12 @@ export default function DataQualityView() {
                                 </Badge>
                               </Td>
                               <Td isNumeric>
-                                {details?.value?.toFixed(3) || 'N/A'}
+                                {toFixedSafe(detailValue, 3, 'N/A')}
                               </Td>
                               <Td>
-                                {details?.min && details?.max ? (
+                                {detailMin !== null && detailMax !== null ? (
                                   <Text fontSize="xs">
-                                    [{details.min.toFixed(2)}, {details.max.toFixed(2)}]
+                                    [{toFixedSafe(detailMin, 2, 'N/A')}, {toFixedSafe(detailMax, 2, 'N/A')}]
                                   </Text>
                                 ) : (
                                   'N/A'

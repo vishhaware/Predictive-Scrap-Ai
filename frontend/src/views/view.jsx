@@ -9,6 +9,7 @@ import {
 } from 'recharts';
 import { Thermometer, Gauge, Zap, Activity } from 'lucide-react';
 import ViolationBanner from '../components/ViolationBanner';
+import { toFixedSafe, toNumberOr } from '../utils/number';
 
 export default function DashboardView({ onNav }) {
     const latest = useTelemetryStore(s => s.latest);
@@ -461,7 +462,7 @@ export default function DashboardView({ onNav }) {
                                             {`${row.now} -> ${row.predicted}`}
                                         </div>
                                         <div style={{ fontFamily: 'JetBrains Mono, monospace', color: row.deviationChange > 0 ? 'var(--status-crit)' : 'var(--status-ok)' }}>
-                                            Dev {(row.predictedDeviation || 0).toFixed(3)} | dDev {row.deviationChange > 0 ? '+' : ''}{(row.deviationChange || 0).toFixed(3)}
+                                            Dev {toFixedSafe(toNumberOr(row.predictedDeviation, 0), 3, '0.000')} | dDev {toNumberOr(row.deviationChange, 0) > 0 ? '+' : ''}{toFixedSafe(toNumberOr(row.deviationChange, 0), 3, '0.000')}
                                         </div>
                                         <span className={`badge ${row.willExceed ? 'badge-crit' : 'badge-ok'}`}>
                                             {row.willExceed

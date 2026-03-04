@@ -4,6 +4,7 @@ import {
 } from 'recharts';
 import { useMemo } from 'react';
 import { formatTelemetryTimestamp } from '../utils/time';
+import { toFiniteOrNull, toFixedSafe } from '../utils/number';
 import { useTelemetryStore } from '../store/useTelemetryStore';
 
 const PARAM_META = {
@@ -20,14 +21,14 @@ const CustomTooltip = ({ active, payload, unit }) => {
     if (!active || !payload?.length) return null;
     const row = payload[0]?.payload;
     const segment = row?.isForecast ? 'Future' : 'Past';
-    const value = typeof row?.value === 'number' ? row.value.toFixed(2) : 'N/A';
-    const setpoint = typeof row?.setpoint === 'number' ? row.setpoint.toFixed(2) : 'N/A';
-    const safeMin = typeof row?.safeMin === 'number' ? row.safeMin.toFixed(2) : 'N/A';
-    const safeMax = typeof row?.safeMax === 'number' ? row.safeMax.toFixed(2) : 'N/A';
-    const volatility = typeof row?.volatility6pt === 'number' ? row.volatility6pt.toFixed(3) : '0.000';
-    const hasConfidence = row?.confidenceUpper !== null && row?.confidenceLower !== null;
-    const confidenceUpper = hasConfidence ? row.confidenceUpper.toFixed(3) : null;
-    const confidenceLower = hasConfidence ? row.confidenceLower.toFixed(3) : null;
+    const value = toFixedSafe(row?.value, 2, 'N/A');
+    const setpoint = toFixedSafe(row?.setpoint, 2, 'N/A');
+    const safeMin = toFixedSafe(row?.safeMin, 2, 'N/A');
+    const safeMax = toFixedSafe(row?.safeMax, 2, 'N/A');
+    const volatility = toFixedSafe(row?.volatility6pt, 3, '0.000');
+    const hasConfidence = Number.isFinite(row?.confidenceUpper) && Number.isFinite(row?.confidenceLower);
+    const confidenceUpper = hasConfidence ? toFixedSafe(row?.confidenceUpper, 3, 'N/A') : null;
+    const confidenceLower = hasConfidence ? toFixedSafe(row?.confidenceLower, 3, 'N/A') : null;
 
     return (
         <div style={{
@@ -124,16 +125,19 @@ export default function RangeAreaChart({
         const historyData = historySlice.map((c, i) => {
             const tele = c.telemetry?.[param];
             if (!tele) return null;
-            const val = tele.value;
-            const histSet = tele.setpoint;
-            const offSet = tele.official_setpoint ?? histSet;
+            const val = toFiniteOrNull(tele.value);
+            const histSet = toFiniteOrNull(tele.setpoint);
+            const offSet = toFiniteOrNull(tele.official_setpoint ?? histSet);
             const set = useHistoricalBaseline ? histSet : offSet;
 
-            const tol = (tele.safe_max !== null && histSet !== null) ? (tele.safe_max - histSet) : 0;
-            const min = useHistoricalBaseline ? tele.safe_min : (set !== null ? set - tol : null);
-            const max = useHistoricalBaseline ? tele.safe_max : (set !== null ? set + tol : null);
+            const rawSafeMin = toFiniteOrNull(tele.safe_min);
+            const rawSafeMax = toFiniteOrNull(tele.safe_max);
+            const tol = (rawSafeMax !== null && histSet !== null) ? (rawSafeMax - histSet) : 0;
+            const min = useHistoricalBaseline ? rawSafeMin : (set !== null ? set - tol : null);
+            const max = useHistoricalBaseline ? rawSafeMax : (set !== null ? set + tol : null);
+            const hasBounds = min !== null && max !== null && max > min;
 
-            const isViolation = (min !== null && val < min) || (max !== null && val > max);
+            const isViolation = val !== null && hasBounds && (val < min || val > max);
             const parsedCycle = Number(c.cycle_id);
             const cycle = Number.isFinite(parsedCycle) ? parsedCycle : i + 1;
             return {
@@ -145,7 +149,7 @@ export default function RangeAreaChart({
                 setpoint: set,
                 safeMin: min,
                 safeMax: max,
-                band: min !== null && max !== null ? [min, max] : undefined,
+                band: hasBounds ? [min, max] : undefined,
                 violation: isViolation ? val : null,
                 isForecast: false,
                 volatility6pt: 0,
@@ -161,14 +165,17 @@ export default function RangeAreaChart({
         const forecastData = forecast.map((f, i) => {
             const tele = f.telemetry?.[param];
             if (!tele) return null;
-            const val = tele.value;
-            const histSet = tele.setpoint;
-            const offSet = tele.official_setpoint ?? histSet;
+            const val = toFiniteOrNull(tele.value);
+            const histSet = toFiniteOrNull(tele.setpoint);
+            const offSet = toFiniteOrNull(tele.official_setpoint ?? histSet);
             const set = useHistoricalBaseline ? histSet : offSet;
 
-            const tol = (tele.safe_max !== null && histSet !== null) ? (tele.safe_max - histSet) : 0;
-            const min = useHistoricalBaseline ? tele.safe_min : (set !== null ? set - tol : null);
-            const max = useHistoricalBaseline ? tele.safe_max : (set !== null ? set + tol : null);
+            const rawSafeMin = toFiniteOrNull(tele.safe_min);
+            const rawSafeMax = toFiniteOrNull(tele.safe_max);
+            const tol = (rawSafeMax !== null && histSet !== null) ? (rawSafeMax - histSet) : 0;
+            const min = useHistoricalBaseline ? rawSafeMin : (set !== null ? set - tol : null);
+            const max = useHistoricalBaseline ? rawSafeMax : (set !== null ? set + tol : null);
+            const hasBounds = min !== null && max !== null && max > min;
 
             const rawForecastMs = new Date(f?.timestamp).getTime();
             const ensuredForecastMs = Number.isFinite(rawForecastMs) && rawForecastMs > lastHistoryMs
@@ -183,7 +190,7 @@ export default function RangeAreaChart({
                 setpoint: set,
                 safeMin: min,
                 safeMax: max,
-                band: min !== null && max !== null ? [min, max] : undefined,
+                band: hasBounds ? [min, max] : undefined,
                 isForecast: true,
                 volatility6pt: 0,
             };
@@ -228,7 +235,34 @@ export default function RangeAreaChart({
     const historyStartPoint = historyOnly.length > 0 ? historyOnly[0] : null;
     const historyEndPoint = historyOnly.length > 0 ? historyOnly[historyOnly.length - 1] : null;
 
-    const allVals = chartData.flatMap(d => [d.value, d.safeMin, d.safeMax].filter(v => v !== null));
+    const allVals = chartData
+        .flatMap(d => [d.value, d.safeMin, d.safeMax].map(toFiniteOrNull))
+        .filter(v => v !== null);
+    if (allVals.length === 0) {
+        return (
+            <div style={{ height: 200 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{meta.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{meta.unit}</span>
+                </div>
+                <div
+                    style={{
+                        height: '82%',
+                        border: '1px dashed var(--border-subtle)',
+                        borderRadius: 'var(--radius-sm)',
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        color: 'var(--text-muted)',
+                        fontSize: 12,
+                        background: 'var(--bg-elevated)',
+                    }}
+                >
+                    No telemetry data available
+                </div>
+            </div>
+        );
+    }
     const yMin = Math.min(...allVals) * 0.97;
     const yMax = Math.max(...allVals) * 1.03;
 
@@ -236,9 +270,10 @@ export default function RangeAreaChart({
     const latestPoint = historyOnly.length > 0 ? historyOnly[historyOnly.length - 1] : null;
     const curVal = latestPoint?.value;
     const setPoint = latestPoint?.setpoint;
-    const delta = (curVal !== null && setPoint !== null) ? (curVal - setPoint) : null;
-    const tol = latestPoint ? (latestPoint.safeMax - latestPoint.setpoint) : 0;
-    const deltaRatio = (delta !== null && tol > 0) ? (Math.abs(delta) / tol).toFixed(1) : null;
+    const delta = (Number.isFinite(curVal) && Number.isFinite(setPoint)) ? (curVal - setPoint) : null;
+    const safeMax = toFiniteOrNull(latestPoint?.safeMax);
+    const tol = (safeMax !== null && Number.isFinite(setPoint)) ? (safeMax - setPoint) : 0;
+    const deltaRatio = (delta !== null && tol > 0) ? toFixedSafe(Math.abs(delta) / tol, 1, null) : null;
     let driftPerHour = null;
     if (historyOnly.length >= 2) {
         const startIdx = Math.max(0, historyOnly.length - 6);
@@ -246,7 +281,7 @@ export default function RangeAreaChart({
         const last = historyOnly[historyOnly.length - 1];
         const firstTs = new Date(first.timestamp).getTime();
         const lastTs = new Date(last.timestamp).getTime();
-        if (Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs > firstTs) {
+        if (Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs > firstTs && Number.isFinite(first?.value) && Number.isFinite(last?.value)) {
             const deltaHours = (lastTs - firstTs) / 3_600_000;
             driftPerHour = (last.value - first.value) / deltaHours;
         }
@@ -265,13 +300,13 @@ export default function RangeAreaChart({
                     )}
                 </div>
 
-                {curVal !== null && (
+                {Number.isFinite(curVal) && (
                     <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 11, fontWeight: 600 }}>
                         <div style={{ color: 'var(--text-muted)' }}>
-                            SET: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{setPoint?.toFixed(2) ?? '---'}</span>
+                            SET: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{toFixedSafe(setPoint, 2, '---')}</span>
                         </div>
                         <div style={{ color: 'var(--text-muted)' }}>
-                            CUR: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{curVal.toFixed(2)}</span>
+                            CUR: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{toFixedSafe(curVal, 2, '---')}</span>
                         </div>
                         {delta !== null && (
                             <div style={{
@@ -281,8 +316,8 @@ export default function RangeAreaChart({
                                 borderRadius: 4,
                                 fontFamily: 'JetBrains Mono'
                             }}>
-                                Δ {delta > 0 ? '+' : ''}{delta.toFixed(2)}
-                                {deltaRatio > 1 && <span style={{ fontSize: 9, marginLeft: 4 }}>({deltaRatio}x TOL)</span>}
+                                Δ {delta > 0 ? '+' : ''}{toFixedSafe(delta, 2, '---')}
+                                {Number(deltaRatio) > 1 && <span style={{ fontSize: 9, marginLeft: 4 }}>({deltaRatio}x TOL)</span>}
                             </div>
                         )}
                     </div>
@@ -290,7 +325,7 @@ export default function RangeAreaChart({
             </div>
             {driftPerHour !== null && (
                 <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>
-                    Trend: {driftPerHour >= 0 ? '↑' : '↓'} {Math.abs(driftPerHour).toFixed(3)} {meta.unit}/hr
+                    Trend: {driftPerHour >= 0 ? '↑' : '↓'} {toFixedSafe(Math.abs(driftPerHour), 3, '0.000')} {meta.unit}/hr
                 </div>
             )}
             {hasForecast && historyStartPoint && historyEndPoint && forecastStartPoint && forecastEndPoint && (
@@ -323,7 +358,7 @@ export default function RangeAreaChart({
                         tickFormatter={(v) => formatTelemetryTimestamp(v)}
                         minTickGap={40}
                     />
-                    <YAxis domain={[yMin, yMax]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} width={36} tickFormatter={v => v.toFixed(1)} />
+                    <YAxis domain={[yMin, yMax]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} width={36} tickFormatter={v => toFixedSafe(v, 1, '')} />
                     <Tooltip content={<CustomTooltip unit={meta.unit} />} />
 
                     {/* Future zone highlight and split marker */}

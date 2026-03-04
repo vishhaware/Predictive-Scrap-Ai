@@ -32,6 +32,7 @@ import {
   Spinner,
   Center,
 } from '@chakra-ui/react';
+import { toFixedSafe } from '../utils/number';
 
 /**
  * ParameterEditorView - Main container for parameter management
@@ -134,9 +135,9 @@ export default function ParameterEditorView() {
                           <Tr key={param.id}>
                             <Td fontWeight="bold">{param.parameter_name}</Td>
                             <Td>{param.machine_id || '(Global)'}</Td>
-                            <Td>{param.tolerance_plus.toFixed(3)}</Td>
-                            <Td>{param.tolerance_minus.toFixed(3)}</Td>
-                            <Td>{param.default_set_value.toFixed(2)}</Td>
+                            <Td>{toFixedSafe(param.tolerance_plus, 3, 'N/A')}</Td>
+                            <Td>{toFixedSafe(param.tolerance_minus, 3, 'N/A')}</Td>
+                            <Td>{toFixedSafe(param.default_set_value, 2, 'N/A')}</Td>
                             <Td>
                               <Badge
                                 colorScheme={

@@ -17,6 +17,7 @@ import {
   Spinner,
   Center,
 } from '@chakra-ui/react';
+import { toNumberOr, toFixedSafe } from '../utils/number';
 
 /**
  * DriftDetectionChart - Visualizes concept drift detection across sensors
@@ -133,18 +134,30 @@ export default function DriftDetectionChart({ machineId = null }) {
               </CardHeader>
               <CardBody>
                 <VStack align="stretch" spacing={3}>
+                  {(() => {
+                    const driftIndex = toNumberOr(window.drift_index, 0);
+                    const meanBaseline = toNumberOr(window.mean_baseline, 0);
+                    const stdBaseline = toNumberOr(window.std_baseline, 0);
+                    const meanCurrent = toNumberOr(window.mean_current, 0);
+                    const stdCurrent = toNumberOr(window.std_current, 0);
+                    const meanDelta = meanCurrent - meanBaseline;
+                    const stdDelta = stdCurrent - stdBaseline;
+                    const meanDeltaPct = meanBaseline !== 0 ? (meanDelta / meanBaseline) * 100 : 0;
+                    const stdDeltaPct = stdBaseline !== 0 ? (stdDelta / stdBaseline) * 100 : 0;
+                    return (
+                      <>
                   {/* Drift Index */}
                   <Box>
                     <Text fontSize="xs" color="gray.600" mb={1}>
                       Drift Index (KL Divergence)
                     </Text>
                     <Text fontSize="xl" fontWeight="bold">
-                      {window.drift_index.toFixed(3)}
+                      {toFixedSafe(driftIndex, 3, '0.000')}
                     </Text>
                     <Text fontSize="xs" color="gray.500" mt={1}>
-                      {window.drift_index < 0.2
+                      {driftIndex < 0.2
                         ? 'No significant drift detected'
-                        : window.drift_index < 0.5
+                        : driftIndex < 0.5
                           ? 'Moderate drift detected'
                           : 'Significant drift detected'}
                     </Text>
@@ -164,10 +177,10 @@ export default function DriftDetectionChart({ machineId = null }) {
                           Baseline (7d ago)
                         </Text>
                         <Text>
-                          μ = {window.mean_baseline.toFixed(2)}
+                          μ = {toFixedSafe(meanBaseline, 2, '0.00')}
                         </Text>
                         <Text>
-                          σ = {window.std_baseline.toFixed(2)}
+                          σ = {toFixedSafe(stdBaseline, 2, '0.00')}
                         </Text>
                       </Box>
                       <Box>
@@ -175,10 +188,10 @@ export default function DriftDetectionChart({ machineId = null }) {
                           Current
                         </Text>
                         <Text>
-                          μ = {window.mean_current.toFixed(2)}
+                          μ = {toFixedSafe(meanCurrent, 2, '0.00')}
                         </Text>
                         <Text>
-                          σ = {window.std_current.toFixed(2)}
+                          σ = {toFixedSafe(stdCurrent, 2, '0.00')}
                         </Text>
                       </Box>
                     </Grid>
@@ -189,23 +202,23 @@ export default function DriftDetectionChart({ machineId = null }) {
                     <Box>
                       <Text color="gray.600">μ Change</Text>
                       <Text fontWeight="bold" color={
-                        Math.abs(window.mean_current - window.mean_baseline) > 1
+                        Math.abs(meanDelta) > 1
                           ? 'orange.600'
                           : 'green.600'
                       }>
-                        {(window.mean_current - window.mean_baseline).toFixed(2)}
-                        {' '}({(((window.mean_current - window.mean_baseline) / window.mean_baseline) * 100).toFixed(1)}%)
+                        {toFixedSafe(meanDelta, 2, '0.00')}
+                        {' '}({toFixedSafe(meanDeltaPct, 1, '0.0')}%)
                       </Text>
                     </Box>
                     <Box>
                       <Text color="gray.600">σ Change</Text>
                       <Text fontWeight="bold" color={
-                        Math.abs(window.std_current - window.std_baseline) > 1
+                        Math.abs(stdDelta) > 1
                           ? 'orange.600'
                           : 'green.600'
                       }>
-                        {(window.std_current - window.std_baseline).toFixed(2)}
-                        {' '}({(((window.std_current - window.std_baseline) / window.std_baseline) * 100).toFixed(1)}%)
+                        {toFixedSafe(stdDelta, 2, '0.00')}
+                        {' '}({toFixedSafe(stdDeltaPct, 1, '0.0')}%)
                       </Text>
                     </Box>
                   </Grid>
@@ -227,6 +240,9 @@ export default function DriftDetectionChart({ machineId = null }) {
                       </Text>
                     </Box>
                   )}
+                      </>
+                    );
+                  })()}
                 </VStack>
               </CardBody>
             </Card>

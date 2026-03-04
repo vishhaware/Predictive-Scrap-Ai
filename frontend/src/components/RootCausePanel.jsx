@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { getTopDefect, buildNarrativeSummary } from '../utils/defectMapper';
+import { toFixedSafe, toNumberOr } from '../utils/number';
 import { t } from '../utils/i18n';
 import { AlertTriangle, Wrench, TrendingUp, TrendingDown } from 'lucide-react';
 
@@ -33,7 +34,9 @@ function formatFeatureLabel(feature) {
 
 export default function RootCausePanel({ shap, telemetry, scrapProb }) {
     const sorted = useMemo(() =>
-        [...(shap ?? [])].sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution)),
+        [...(shap ?? [])]
+            .map((item) => ({ ...item, contribution: toNumberOr(item?.contribution, 0) }))
+            .sort((a, b) => Math.abs(b.contribution) - Math.abs(a.contribution)),
         [shap]
     );
 
@@ -85,7 +88,7 @@ export default function RootCausePanel({ shap, telemetry, scrapProb }) {
                                 />
                             </div>
                             <div className={`shap-score ${isPos ? 'pos' : 'neg'}`}>
-                                {isPos ? '+' : ''}{item.contribution.toFixed(3)}
+                                {isPos ? '+' : ''}{toFixedSafe(item.contribution, 3, '0.000')}
                             </div>
                         </div>
                     );

@@ -51,7 +51,33 @@ The artifact payload includes:
 
 ### Import + promote locally (registry bundle)
 
-After download/extract:
+Preferred flow (from `C:\new project\New folder\backend_fastapi`):
+
+```powershell
+# 1) Ensure local artifact folder exists
+New-Item -ItemType Directory -Force .\downloaded | Out-Null
+
+# 2) Stage latest real Kaggle artifact from Downloads (zip or pkl)
+.\stage-kaggle-artifact.ps1
+
+# If artifact is not in Downloads, pass exact path directly:
+# .\stage-kaggle-artifact.ps1 -ArtifactPath "D:\somewhere\sfb_registry_bundle_export.zip"
+
+# Note: stage script auto-checks browser download directories from Edge/Chrome
+# preferences (for example custom folders on E:/F: drives), not only %USERPROFILE%\Downloads.
+# If you see a `.crdownload` file, the download is incomplete; wait for completion or re-download.
+
+# 3) One-shot guarded import + verification
+.\recover-kaggle-import.ps1 -Task scrap_classifier -Promote
+```
+
+Equivalent command from repo root:
+
+```powershell
+.\recover-kaggle-import.ps1 -Task scrap_classifier -Promote
+```
+
+Manual flow (explicit bundle path):
 
 ```powershell
 python backend_fastapi/import_registry_bundle.py `
@@ -65,6 +91,22 @@ Shortcut wrapper (repo root):
 
 ```powershell
 .\import-kaggle-model.ps1 -BundleJoblib ".\downloaded\<MODEL_ID>.pkl" -Promote
+```
+
+Fail-safe bundle discovery snippet (prevents null `$pkl` import call):
+
+```powershell
+$pkl = Get-ChildItem .\downloaded -Recurse -File -Filter *.pkl |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1
+
+if (-not $pkl) {
+  Write-Host "No .pkl found under .\downloaded" -ForegroundColor Yellow
+  Get-ChildItem .\downloaded -Recurse -Force
+  return
+}
+
+.\import-kaggle-model.ps1 -BundleJoblib $pkl.FullName -Task scrap_classifier -Promote
 ```
 
 Machine-scoped promotion example:
