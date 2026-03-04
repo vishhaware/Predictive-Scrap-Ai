@@ -7,9 +7,6 @@ import { useTelemetryStore } from '../store/useTelemetryStore';
  */
 export function useWebSocket() {
     const currentMachine = useTelemetryStore(s => s.currentMachine);
-    const pushCycle = useTelemetryStore(s => s.pushCycle);
-    const setBackendStatus = useTelemetryStore(s => s.setBackendStatus);
-    const checkBackendHealth = useTelemetryStore(s => s.checkBackendHealth);
 
     const wsRef = useRef(null);
     const reconnectTimerRef = useRef(null);
@@ -69,7 +66,7 @@ export function useWebSocket() {
 
             ws.onopen = () => {
                 reconnectAttemptRef.current = 0;
-                setBackendStatus('online');
+                useTelemetryStore.getState().setBackendStatus('online');
                 if (pingTimerRef.current) clearInterval(pingTimerRef.current);
                 pingTimerRef.current = setInterval(() => {
                     if (ws.readyState === WebSocket.OPEN) {
@@ -86,15 +83,15 @@ export function useWebSocket() {
                 try {
                     const msg = JSON.parse(event.data);
                     if (msg.type === 'cycle_update' && msg.cycle) {
-                        pushCycle(msg.cycle);
+                        useTelemetryStore.getState().pushCycle(msg.cycle);
                         return;
                     }
                     if (msg.type === 'pong') {
-                        setBackendStatus('online');
+                        useTelemetryStore.getState().setBackendStatus('online');
                         return;
                     }
                     if (msg.type === 'error') {
-                        setBackendStatus('degraded');
+                        useTelemetryStore.getState().setBackendStatus('degraded');
                     }
                 } catch (e) {
                     console.error('WS parse error:', e);
@@ -104,7 +101,7 @@ export function useWebSocket() {
             ws.onclose = async () => {
                 wsRef.current = null;
                 if (!shouldReconnectRef.current) return;
-                setBackendStatus('degraded');
+                useTelemetryStore.getState().setBackendStatus('degraded');
                 if (pingTimerRef.current) {
                     clearInterval(pingTimerRef.current);
                     pingTimerRef.current = null;
@@ -115,9 +112,9 @@ export function useWebSocket() {
                 const jitter = Math.floor(Math.random() * 400);
                 const delay = Math.min(BASE_RECONNECT_MS * (2 ** attempt) + jitter, MAX_RECONNECT_MS);
 
-                const health = await checkBackendHealth();
+                const health = await useTelemetryStore.getState().checkBackendHealth();
                 if (!health) {
-                    setBackendStatus('offline');
+                    useTelemetryStore.getState().setBackendStatus('offline');
                 }
                 if (!shouldReconnectRef.current) return;
 
@@ -127,7 +124,7 @@ export function useWebSocket() {
             ws.onerror = (err) => {
                 console.error('WS error:', err);
                 // Avoid forcing close here; browsers usually emit close after error.
-                setBackendStatus('degraded');
+                useTelemetryStore.getState().setBackendStatus('degraded');
             };
         }
 
@@ -136,7 +133,7 @@ export function useWebSocket() {
         healthTimerRef.current = setInterval(() => {
             const ws = wsRef.current;
             if (!ws || ws.readyState !== WebSocket.OPEN) {
-                void checkBackendHealth();
+                void useTelemetryStore.getState().checkBackendHealth();
             }
         }, HEALTH_CHECK_MS);
 
@@ -158,9 +155,9 @@ export function useWebSocket() {
                 wsRef.current.close(1000, 'component unmount');
                 wsRef.current = null;
             }
-            setBackendStatus('offline');
+            useTelemetryStore.getState().setBackendStatus('offline');
         };
-    }, [checkBackendHealth, pushCycle, setBackendStatus]);
+    }, []);
 
     useEffect(() => {
         const ws = wsRef.current;

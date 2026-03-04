@@ -74,6 +74,57 @@ test('bootstrap loads once and deduplicates repeated calls', async () => {
             };
         }
 
+        if (String(url).includes('/api/machines/M231-11/chart-data')) {
+            return {
+                ok: true,
+                async json() {
+                    return {
+                        machine_id: 'M231-11',
+                        part_number: '8-1419168-4',
+                        past: [
+                            {
+                                timestamp: '2026-01-01T00:00:00.000Z',
+                                scrap_prob: 0.1,
+                                scrap_pct: 10,
+                                volatility_6pt: 0,
+                                segment: 'Past',
+                                source: 'observed',
+                            },
+                        ],
+                        future: [
+                            {
+                                timestamp: '2026-01-01T00:01:00.000Z',
+                                scrap_prob: 0.2,
+                                scrap_pct: 20,
+                                volatility_6pt: 1,
+                                segment: 'Future',
+                                source: 'forecasted',
+                            },
+                        ],
+                        meta: {
+                            past_last_ts: '2026-01-01T00:00:00.000Z',
+                            future_first_ts: '2026-01-01T00:01:00.000Z',
+                            seam_ok: true,
+                        },
+                    };
+                }
+            };
+        }
+
+        if (String(url).includes('/api/fleet/chart-data')) {
+            return {
+                ok: true,
+                async json() {
+                    return {
+                        past: [],
+                        future: [],
+                        per_machine: [],
+                        meta: { seam_ok: true },
+                    };
+                }
+            };
+        }
+
         if (String(url).includes('/api/ai/metrics')) {
             return {
                 ok: true,
@@ -109,12 +160,75 @@ test('bootstrap loads once and deduplicates repeated calls', async () => {
 
         assert.equal(calls.filter(x => x.endsWith('/api/machines')).length, 1);
         assert.equal(calls.filter(x => x.includes('/api/machines/M231-11/cycles')).length, 1);
+        assert.equal(calls.filter(x => x.includes('/api/machines/M231-11/chart-data')).length, 1);
+        assert.equal(calls.filter(x => x.includes('/api/fleet/chart-data')).length, 1);
         assert.equal(calls.filter(x => x.endsWith('/api/health')).length, 1);
         assert.equal(calls.filter(x => x.includes('/api/ai/metrics')).length, 1);
 
         const state = useTelemetryStore.getState();
         assert.equal(state.machines.length, 1);
         assert.equal(state.history.length, 1);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('loadChartData stores machine past/future payload', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+        if (!String(url).includes('/api/machines/M231-11/chart-data')) {
+            throw new Error(`Unexpected fetch URL: ${url}`);
+        }
+        return {
+            ok: true,
+            async json() {
+                return {
+                    machine_id: 'M231-11',
+                    past: [{ timestamp: '2026-01-01T00:00:00.000Z', scrap_prob: 0.1, scrap_pct: 10, volatility_6pt: 0, segment: 'Past', source: 'observed' }],
+                    future: [{ timestamp: '2026-01-01T00:01:00.000Z', scrap_prob: 0.2, scrap_pct: 20, volatility_6pt: 1, segment: 'Future', source: 'forecasted' }],
+                    meta: { seam_ok: true },
+                };
+            },
+        };
+    };
+
+    try {
+        await useTelemetryStore.getState().loadChartData('M231-11', '8-1419168-4', 120);
+        const state = useTelemetryStore.getState();
+        assert.equal(Boolean(state.chartData), true);
+        assert.equal(state.chartData.meta.seam_ok, true);
+        assert.equal(state.chartData.past.length, 1);
+        assert.equal(state.chartData.future.length, 1);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('loadFleetChartData stores aggregated payload', async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url) => {
+        if (!String(url).includes('/api/fleet/chart-data')) {
+            throw new Error(`Unexpected fetch URL: ${url}`);
+        }
+        return {
+            ok: true,
+            async json() {
+                return {
+                    past: [{ timestamp: '2026-01-01T00:00:00.000Z', scrap_prob: 0.1, scrap_pct: 10, volatility_6pt: 0, segment: 'Past', source: 'fleet_observed' }],
+                    future: [{ timestamp: '2026-01-01T00:05:00.000Z', scrap_prob: 0.2, scrap_pct: 20, volatility_6pt: 1, segment: 'Future', source: 'fleet_forecasted' }],
+                    per_machine: [{ machine_id: 'M231-11', future_peak_scrap_prob: 0.2 }],
+                    meta: { seam_ok: true },
+                };
+            },
+        };
+    };
+
+    try {
+        await useTelemetryStore.getState().loadFleetChartData(120);
+        const state = useTelemetryStore.getState();
+        assert.equal(Boolean(state.fleetChartData), true);
+        assert.equal(state.fleetChartData.meta.seam_ok, true);
+        assert.equal(state.fleetChartData.per_machine.length, 1);
     } finally {
         globalThis.fetch = originalFetch;
     }

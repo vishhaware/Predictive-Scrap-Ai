@@ -1,9 +1,10 @@
 import {
     ComposedChart, Area, Line, Scatter, XAxis, YAxis, CartesianGrid,
-    Tooltip, ResponsiveContainer, ReferenceLine, Legend,
+    Tooltip, ResponsiveContainer, ReferenceLine, ReferenceArea, Legend,
 } from 'recharts';
 import { useMemo } from 'react';
 import { formatTelemetryTimestamp } from '../utils/time';
+import { useTelemetryStore } from '../store/useTelemetryStore';
 
 const PARAM_META = {
     cushion: { label: 'Cushion', unit: 'mm', color: '#60a5fa' },
@@ -15,29 +16,15 @@ const PARAM_META = {
     temp_z3: { label: 'Temp Zone 3', unit: '°C', color: '#ff9e6b' },
 };
 
-const CustomTooltip = ({ active, payload, label, unit }) => {
+const CustomTooltip = ({ active, payload, unit }) => {
     if (!active || !payload?.length) return null;
-    const entries = payload.filter(
-        p =>
-            p.value !== null &&
-            p.value !== undefined &&
-            !['cycle', 'cycleDisplay', 'idx', 'timestamp'].includes(String(p.dataKey))
-    );
     const row = payload[0]?.payload;
-    const cycleLabel = row?.cycleDisplay ?? label;
-
-    const formatValue = (value) => {
-        if (Array.isArray(value) && value.length === 2) {
-            const [low, high] = value;
-            const lowTxt = typeof low === 'number' ? low.toFixed(2) : String(low);
-            const highTxt = typeof high === 'number' ? high.toFixed(2) : String(high);
-            return `${lowTxt} - ${highTxt}`;
-        }
-        if (typeof value === 'number') {
-            return value.toFixed(2);
-        }
-        return String(value);
-    };
+    const segment = row?.isForecast ? 'Future' : 'Past';
+    const value = typeof row?.value === 'number' ? row.value.toFixed(2) : 'N/A';
+    const setpoint = typeof row?.setpoint === 'number' ? row.setpoint.toFixed(2) : 'N/A';
+    const safeMin = typeof row?.safeMin === 'number' ? row.safeMin.toFixed(2) : 'N/A';
+    const safeMax = typeof row?.safeMax === 'number' ? row.safeMax.toFixed(2) : 'N/A';
+    const volatility = typeof row?.volatility6pt === 'number' ? row.volatility6pt.toFixed(3) : '0.000';
 
     return (
         <div style={{
@@ -45,34 +32,87 @@ const CustomTooltip = ({ active, payload, label, unit }) => {
             borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: 12,
             boxShadow: 'var(--shadow-card)', minWidth: 160,
         }}>
-            <div style={{ color: 'var(--text-muted)', marginBottom: 6, fontSize: 11 }}>Cycle #{cycleLabel}</div>
+            <div style={{ color: 'var(--text-muted)', marginBottom: 6, fontSize: 11 }}>Segment: {segment}</div>
             <div style={{ color: 'var(--text-muted)', marginBottom: 8, fontSize: 11 }}>
-                Time: {formatTelemetryTimestamp(row?.timestamp)}
+                Timestamp: {formatTelemetryTimestamp(row?.timestamp)}
             </div>
-            {entries.map((e, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 3 }}>
-                    <span style={{ color: e.color ?? 'var(--text-secondary)' }}>{e.name}</span>
-                    <span style={{ fontFamily: 'JetBrains Mono, monospace', fontWeight: 700, color: 'var(--text-primary)' }}>
-                        {formatValue(e.value)} {unit}
-                    </span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 3 }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Value</span>
+                <span style={{ fontFamily: 'JetBrains Mono, monospace', fontWeight: 700, color: 'var(--text-primary)' }}>{value} {unit}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 3 }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Setpoint</span>
+                <span style={{ fontFamily: 'JetBrains Mono, monospace', fontWeight: 700, color: 'var(--text-primary)' }}>{setpoint}</span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, marginBottom: 3 }}>
+                <span style={{ color: 'var(--text-secondary)' }}>Volatility (6-pt)</span>
+                <span style={{ fontFamily: 'JetBrains Mono, monospace', fontWeight: 700, color: 'var(--text-primary)' }}>{volatility}</span>
+            </div>
+
+            <div style={{ marginTop: 8, borderTop: '1px solid var(--border-subtle)', paddingTop: 6 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10, color: 'var(--text-muted)' }}>
+                    <span>OK Range</span>
+                    <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{safeMin} - {safeMax}</span>
                 </div>
-            ))}
+                {row?.isForecast && (
+                    <div style={{ marginTop: 4, padding: '2px 6px', background: 'var(--status-info-dim)', color: 'var(--status-info)', borderRadius: 4, fontWeight: 700, fontSize: 8, textAlign: 'center' }}>
+                        Model label: forecasted
+                    </div>
+                )}
+            </div>
         </div>
     );
 };
 
 export default function RangeAreaChart({ history, forecast, param, windowSize = 80 }) {
     const meta = PARAM_META[param] ?? { label: param, unit: '', color: '#60a5fa' };
+    const useHistoricalBaseline = useTelemetryStore(s => s.useHistoricalBaseline);
 
     const chartData = useMemo(() => {
+        const rollingVolatility = (series) => {
+            const out = [];
+            const window = 6;
+            for (let i = 0; i < series.length; i += 1) {
+                const start = Math.max(0, i - window + 1);
+                const chunk = series.slice(start, i + 1).filter((v) => Number.isFinite(v));
+                if (chunk.length < 2) {
+                    out.push(0);
+                    continue;
+                }
+                const mean = chunk.reduce((sum, v) => sum + v, 0) / chunk.length;
+                const variance = chunk.reduce((sum, v) => sum + ((v - mean) ** 2), 0) / chunk.length;
+                out.push(Math.sqrt(Math.max(0, variance)));
+            }
+            return out;
+        };
+
         const historySlice = history.slice(-windowSize);
+        const historyTimes = historySlice
+            .map(c => new Date(c?.timestamp).getTime())
+            .filter(ms => Number.isFinite(ms))
+            .sort((a, b) => a - b);
+        const historyStepCandidates = [];
+        for (let i = 1; i < historyTimes.length; i++) {
+            const delta = historyTimes[i] - historyTimes[i - 1];
+            if (delta > 0) historyStepCandidates.push(delta);
+        }
+        const fallbackStepMs = historyStepCandidates.length > 0
+            ? historyStepCandidates[Math.floor(historyStepCandidates.length / 2)]
+            : 60_000;
+        const lastHistoryMs = historyTimes.length > 0 ? historyTimes[historyTimes.length - 1] : Date.now();
+
         const historyData = historySlice.map((c, i) => {
             const tele = c.telemetry?.[param];
             if (!tele) return null;
-            const min = tele.safe_min;
-            const max = tele.safe_max;
             const val = tele.value;
-            const set = tele.setpoint;
+            const histSet = tele.setpoint;
+            const offSet = tele.official_setpoint ?? histSet;
+            const set = useHistoricalBaseline ? histSet : offSet;
+
+            const tol = (tele.safe_max !== null && histSet !== null) ? (tele.safe_max - histSet) : 0;
+            const min = useHistoricalBaseline ? tele.safe_min : (set !== null ? set - tol : null);
+            const max = useHistoricalBaseline ? tele.safe_max : (set !== null ? set + tol : null);
+
             const isViolation = (min !== null && val < min) || (max !== null && val > max);
             const parsedCycle = Number(c.cycle_id);
             const cycle = Number.isFinite(parsedCycle) ? parsedCycle : i + 1;
@@ -88,36 +128,50 @@ export default function RangeAreaChart({ history, forecast, param, windowSize = 
                 band: min !== null && max !== null ? [min, max] : undefined,
                 violation: isViolation ? val : null,
                 isForecast: false,
+                volatility6pt: 0,
             };
         }).filter(Boolean);
 
         if (!forecast || !Array.isArray(forecast) || forecast.length === 0) {
-            return historyData;
+            const vols = rollingVolatility(historyData.map((row) => row.value));
+            return historyData.map((row, idx) => ({ ...row, volatility6pt: vols[idx] || 0 }));
         }
 
         const lastCycle = historyData[historyData.length - 1]?.cycle || 0;
         const forecastData = forecast.map((f, i) => {
             const tele = f.telemetry?.[param];
             if (!tele) return null;
-            const min = tele.safe_min;
-            const max = tele.safe_max;
             const val = tele.value;
-            const set = tele.setpoint;
+            const histSet = tele.setpoint;
+            const offSet = tele.official_setpoint ?? histSet;
+            const set = useHistoricalBaseline ? histSet : offSet;
+
+            const tol = (tele.safe_max !== null && histSet !== null) ? (tele.safe_max - histSet) : 0;
+            const min = useHistoricalBaseline ? tele.safe_min : (set !== null ? set - tol : null);
+            const max = useHistoricalBaseline ? tele.safe_max : (set !== null ? set + tol : null);
+
+            const rawForecastMs = new Date(f?.timestamp).getTime();
+            const ensuredForecastMs = Number.isFinite(rawForecastMs) && rawForecastMs > lastHistoryMs
+                ? rawForecastMs
+                : (lastHistoryMs + fallbackStepMs * (i + 1));
             return {
                 cycle: lastCycle + i + 1,
                 cycleDisplay: lastCycle + i + 1,
                 idx: historyData.length + i + 1,
-                timestamp: f.timestamp,
+                timestamp: new Date(ensuredForecastMs).toISOString(),
                 value: val,
                 setpoint: set,
                 safeMin: min,
                 safeMax: max,
                 band: min !== null && max !== null ? [min, max] : undefined,
                 isForecast: true,
+                volatility6pt: 0,
             };
         }).filter(Boolean);
 
-        return [...historyData, ...forecastData];
+        const combined = [...historyData, ...forecastData];
+        const vols = rollingVolatility(combined.map((row) => row.value));
+        return combined.map((row, idx) => ({ ...row, volatility6pt: vols[idx] || 0 }));
     }, [history, forecast, param, windowSize]);
 
     if (chartData.length === 0) {
@@ -147,25 +201,90 @@ export default function RangeAreaChart({ history, forecast, param, windowSize = 
     }
 
     const hasViolation = chartData.some(d => d.violation !== null);
+    const hasForecast = chartData.some(d => d.isForecast);
+    const forecastStartPoint = hasForecast ? chartData.find(d => d.isForecast) : null;
+    const forecastEndPoint = hasForecast ? chartData[chartData.length - 1] : null;
+    const historyOnly = chartData.filter(d => !d.isForecast);
+    const historyStartPoint = historyOnly.length > 0 ? historyOnly[0] : null;
+    const historyEndPoint = historyOnly.length > 0 ? historyOnly[historyOnly.length - 1] : null;
 
-    // Compute Y-axis domain with padding
     const allVals = chartData.flatMap(d => [d.value, d.safeMin, d.safeMax].filter(v => v !== null));
     const yMin = Math.min(...allVals) * 0.97;
     const yMax = Math.max(...allVals) * 1.03;
-    const uniqueCycleCount = new Set(chartData.map(d => d.cycle)).size;
-    const xAxisKey = uniqueCycleCount < chartData.length ? 'idx' : 'cycle';
+
+    // Latest stats for header
+    const latestPoint = historyOnly.length > 0 ? historyOnly[historyOnly.length - 1] : null;
+    const curVal = latestPoint?.value;
+    const setPoint = latestPoint?.setpoint;
+    const delta = (curVal !== null && setPoint !== null) ? (curVal - setPoint) : null;
+    const tol = latestPoint ? (latestPoint.safeMax - latestPoint.setpoint) : 0;
+    const deltaRatio = (delta !== null && tol > 0) ? (Math.abs(delta) / tol).toFixed(1) : null;
+    let driftPerHour = null;
+    if (historyOnly.length >= 2) {
+        const startIdx = Math.max(0, historyOnly.length - 6);
+        const first = historyOnly[startIdx];
+        const last = historyOnly[historyOnly.length - 1];
+        const firstTs = new Date(first.timestamp).getTime();
+        const lastTs = new Date(last.timestamp).getTime();
+        if (Number.isFinite(firstTs) && Number.isFinite(lastTs) && lastTs > firstTs) {
+            const deltaHours = (lastTs - firstTs) / 3_600_000;
+            driftPerHour = (last.value - first.value) / deltaHours;
+        }
+    }
 
     return (
         <div style={{ height: 200 }}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{meta.label}</span>
-                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{meta.unit}</span>
-                {hasViolation && (
-                    <span className="badge badge-crit" style={{ fontSize: 10, padding: '2px 7px' }}>
-                        ⚡ VIOLATION
-                    </span>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{meta.label}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{meta.unit}</span>
+                    {hasViolation && (
+                        <span className="badge badge-crit" style={{ fontSize: 9, padding: '1px 6px' }}>
+                            VIOLATION
+                        </span>
+                    )}
+                </div>
+
+                {curVal !== null && (
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 12, fontSize: 11, fontWeight: 600 }}>
+                        <div style={{ color: 'var(--text-muted)' }}>
+                            SET: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{setPoint?.toFixed(2) ?? '---'}</span>
+                        </div>
+                        <div style={{ color: 'var(--text-muted)' }}>
+                            CUR: <span style={{ color: 'var(--text-primary)', fontFamily: 'JetBrains Mono' }}>{curVal.toFixed(2)}</span>
+                        </div>
+                        {delta !== null && (
+                            <div style={{
+                                color: hasViolation ? 'var(--status-crit)' : 'var(--status-ok)',
+                                background: hasViolation ? 'var(--status-crit-dim)' : 'var(--status-ok-dim)',
+                                padding: '1px 6px',
+                                borderRadius: 4,
+                                fontFamily: 'JetBrains Mono'
+                            }}>
+                                Δ {delta > 0 ? '+' : ''}{delta.toFixed(2)}
+                                {deltaRatio > 1 && <span style={{ fontSize: 9, marginLeft: 4 }}>({deltaRatio}x TOL)</span>}
+                            </div>
+                        )}
+                    </div>
                 )}
             </div>
+            {driftPerHour !== null && (
+                <div style={{ fontSize: 10, color: 'var(--text-muted)', marginBottom: 4 }}>
+                    Trend: {driftPerHour >= 0 ? '↑' : '↓'} {Math.abs(driftPerHour).toFixed(3)} {meta.unit}/hr
+                </div>
+            )}
+            {hasForecast && historyStartPoint && historyEndPoint && forecastStartPoint && forecastEndPoint && (
+                <div style={{ display: 'flex', gap: 12, marginBottom: 6, fontSize: 10, color: 'var(--text-muted)' }}>
+                    <span>
+                        <strong style={{ color: 'var(--text-secondary)' }}>Past:</strong>{' '}
+                        {formatTelemetryTimestamp(historyStartPoint.timestamp)} to {formatTelemetryTimestamp(historyEndPoint.timestamp)}
+                    </span>
+                    <span>
+                        <strong style={{ color: 'var(--accent-blue-lt)' }}>Future:</strong>{' '}
+                        {formatTelemetryTimestamp(forecastStartPoint.timestamp)} to {formatTelemetryTimestamp(forecastEndPoint.timestamp)}
+                    </span>
+                </div>
+            )}
             <ResponsiveContainer width="100%" height="85%">
                 <ComposedChart data={chartData} margin={{ top: 4, right: 10, left: -10, bottom: 0 }}>
                     <defs>
@@ -186,6 +305,29 @@ export default function RangeAreaChart({ history, forecast, param, windowSize = 
                     />
                     <YAxis domain={[yMin, yMax]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} width={36} tickFormatter={v => v.toFixed(1)} />
                     <Tooltip content={<CustomTooltip unit={meta.unit} />} />
+
+                    {/* Future zone highlight and split marker */}
+                    {hasForecast && forecastStartPoint && forecastEndPoint && (
+                        <>
+                            <ReferenceArea
+                                x1={forecastStartPoint.timestamp}
+                                x2={forecastEndPoint.timestamp}
+                                y1={yMin}
+                                y2={yMax}
+                                fill={meta.color}
+                                fillOpacity={0.06}
+                                ifOverflow="extendDomain"
+                            />
+                            <ReferenceLine
+                                x={forecastStartPoint.timestamp}
+                                stroke={meta.color}
+                                strokeDasharray="2 4"
+                                strokeOpacity={0.8}
+                                ifOverflow="extendDomain"
+                                label={{ value: 'Past -> Future seam', position: 'insideTopRight', fontSize: 10, fill: '#475569' }}
+                            />
+                        </>
+                    )}
 
                     {/* Safe envelope band */}
                     {chartData[0]?.band && (
@@ -228,7 +370,7 @@ export default function RangeAreaChart({ history, forecast, param, windowSize = 
                     />
 
                     {/* Predicted value (Forecast) */}
-                    {chartData.some(d => d.isForecast) && (
+                    {hasForecast && (
                         <Line
                             dataKey="value"
                             name={`${meta.label} (Forecast)`}

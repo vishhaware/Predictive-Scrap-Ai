@@ -97,6 +97,10 @@ export const useTelemetryStore = create((set, get) => ({
     partOptions: [],
     controlRoom: null,
     controlRoomLoading: false,
+    chartData: null,
+    chartDataLoading: false,
+    fleetChartData: null,
+    fleetChartDataLoading: false,
     lstmPreview: null,
     lstmPreviewLoading: false,
     aiMetrics: null,
@@ -104,7 +108,10 @@ export const useTelemetryStore = create((set, get) => ({
     lastMachinesRefreshAt: 0,
     lastCyclesRefreshAt: 0,
     lastControlRoomRefreshAt: 0,
+    lastChartDataRefreshAt: 0,
+    lastFleetChartDataRefreshAt: 0,
     lastAiMetricsRefreshAt: 0,
+    useHistoricalBaseline: false,
 
     // ── Actions ────────────────────────────────────────────────────────────────
     setBackendStatus(status, backendInfo = null) {
@@ -112,6 +119,10 @@ export const useTelemetryStore = create((set, get) => ({
             backendStatus: status,
             backendInfo: backendInfo ?? (status === 'offline' ? null : state.backendInfo),
         }));
+    },
+
+    setUseHistoricalBaseline(val) {
+        set({ useHistoricalBaseline: !!val });
     },
 
     async checkBackendHealth() {
@@ -137,6 +148,8 @@ export const useTelemetryStore = create((set, get) => ({
             await get().loadMachineParts(get().currentMachine);
             await get().loadCycles(get().currentMachine);
             await get().loadControlRoom(get().currentMachine, get().partNumber);
+            await get().loadChartData(get().currentMachine, get().partNumber, 60);
+            await get().loadFleetChartData(60);
             await get().loadAiMetrics();
             hasBootstrapped = true;
         })().finally(() => {
@@ -191,7 +204,13 @@ export const useTelemetryStore = create((set, get) => ({
 
     setPartNumber(partNumber) {
         const normalized = typeof partNumber === 'string' ? partNumber.trim() : '';
-        set({ partNumber: normalized, controlRoom: null, controlRoomLoading: true });
+        set({
+            partNumber: normalized,
+            controlRoom: null,
+            controlRoomLoading: true,
+            chartData: null,
+            chartDataLoading: true,
+        });
     },
 
     async loadMachineParts(machineId = get().currentMachine) {
@@ -240,6 +259,65 @@ export const useTelemetryStore = create((set, get) => ({
         } catch (err) {
             console.error(`Failed to load control-room payload for ${machineId}:`, err);
             set({ controlRoomLoading: false });
+            get().setBackendStatus('degraded');
+        }
+    },
+
+    async loadChartData(
+        machineId = get().currentMachine,
+        partNumber = get().partNumber,
+        horizonMinutes = 60,
+    ) {
+        if (!machineId) return;
+        set({ chartDataLoading: true });
+        try {
+            const query = new URLSearchParams({
+                horizon_minutes: String(Math.max(5, Math.min(Number(horizonMinutes) || 60, 1920))),
+                history_limit: '500',
+                shift_hours: '24',
+            });
+            if (partNumber && String(partNumber).trim()) {
+                query.set('part_number', String(partNumber).trim());
+            }
+            const payload = await fetchJson(`${API_BASE}/machines/${machineId}/chart-data?${query.toString()}`, {
+                retries: 2,
+                timeoutMs: 30000,
+            });
+            set({
+                chartData: payload,
+                chartDataLoading: false,
+                lastChartDataRefreshAt: Date.now(),
+            });
+            get().setBackendStatus('online');
+        } catch (err) {
+            console.error(`Failed to load chart-data payload for ${machineId}:`, err);
+            set({ chartDataLoading: false });
+            get().setBackendStatus('degraded');
+        }
+    },
+
+    async loadFleetChartData(horizonMinutes = 60) {
+        set({ fleetChartDataLoading: true });
+        try {
+            const query = new URLSearchParams({
+                horizon_minutes: String(Math.max(5, Math.min(Number(horizonMinutes) || 60, 1920))),
+                history_hours: '24',
+                bucket_minutes: '5',
+                shift_hours: '24',
+            });
+            const payload = await fetchJson(`${API_BASE}/fleet/chart-data?${query.toString()}`, {
+                retries: 1,
+                timeoutMs: 20000,
+            });
+            set({
+                fleetChartData: payload,
+                fleetChartDataLoading: false,
+                lastFleetChartDataRefreshAt: Date.now(),
+            });
+            get().setBackendStatus('online');
+        } catch (err) {
+            console.error('Failed to load fleet chart-data:', err);
+            set({ fleetChartDataLoading: false });
             get().setBackendStatus('degraded');
         }
     },
@@ -422,6 +500,8 @@ export const useTelemetryStore = create((set, get) => ({
             replayIndex: 0,
             isLoading: true,
             controlRoom: null,
+            chartData: null,
+            fleetChartData: null,
             lstmPreview: null,
             partOptions: [],
             partNumber: '',
@@ -436,7 +516,9 @@ export const useTelemetryStore = create((set, get) => ({
         // Load auxiliary data in parallel (non-blocking)
         get().loadMachineParts(machineId).then(() => {
             get().loadControlRoom(machineId, get().partNumber);
+            get().loadChartData(machineId, get().partNumber, 60);
         });
+        get().loadFleetChartData(60);
         get().loadAiMetrics();
     },
 

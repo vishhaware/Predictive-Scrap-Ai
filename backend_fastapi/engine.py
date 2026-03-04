@@ -16,26 +16,85 @@ try:
 except ImportError:
     from .sequence_model import SequenceModelService
 
-# --- Thresholds from Technical specification + CSV Data Audit ---
-# CSV Audit corr with Scrap_counter: Shot_size=0.9999, Ejector_fix=0.990, Cyl_tmp_z8 active
-THRESHOLDS = {
-    "Cushion": {"tolerance": 0.5, "unit": "mm", "weight": 0.32, "critical": True},
-    "Injection_time": {"tolerance": 0.03, "unit": "s", "weight": 0.12, "critical": True},
-    "Dosage_time": {"tolerance": 1.0, "unit": "s", "weight": 0.15, "critical": True},
-    "Injection_pressure": {"tolerance": 100, "unit": "bar", "weight": 0.08, "critical": False},
-    "Switch_pressure": {"tolerance": 100, "unit": "bar", "weight": 0.08, "critical": False},
-    "Switch_position": {"tolerance": 0.05, "unit": "mm", "weight": 0.12, "critical": True},
-    "Cycle_time": {"tolerance": 2.0, "unit": "s", "weight": 0.04, "critical": False},
-    "Cyl_tmp_z1": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-    "Cyl_tmp_z2": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-    "Cyl_tmp_z3": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-    "Cyl_tmp_z4": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-    "Cyl_tmp_z5": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-    # === NEW from CSV Audit: high correlation with Scrap_counter ===
-    "Shot_size": {"tolerance": 3.0, "unit": "mm", "weight": 0.15, "critical": True},
-    "Ejector_fix_deviation_torque": {"tolerance": 2.0, "unit": "Nm", "weight": 0.12, "critical": True},
-    "Cyl_tmp_z8": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
-}
+# --- Thresholds from Official TE Connectivity CSV Rules ---
+CSV_V2_PATH = os.path.join(os.path.dirname(__file__), "AI_cup_parameter_info_cleaned_v2.csv")
+CSV_PATH = os.path.join(os.path.dirname(__file__), "AI_cup_parameter_info_cleaned.csv")
+
+def _load_official_thresholds(part_number: Optional[str] = None):
+    # Base configuration with weights/units from engineering baseline
+    base = {
+        "Cushion": {"tolerance": 0.5, "unit": "mm", "weight": 0.32, "critical": True},
+        "Injection_time": {"tolerance": 0.03, "unit": "s", "weight": 0.12, "critical": True},
+        "Dosage_time": {"tolerance": 1.0, "unit": "s", "weight": 0.15, "critical": True},
+        "Injection_pressure": {"tolerance": 100, "unit": "bar", "weight": 0.08, "critical": False},
+        "Switch_pressure": {"tolerance": 100, "unit": "bar", "weight": 0.08, "critical": False},
+        "Switch_position": {"tolerance": 0.05, "unit": "mm", "weight": 0.12, "critical": True},
+        "Cycle_time": {"tolerance": 2.0, "unit": "s", "weight": 0.04, "critical": False},
+        "Cyl_tmp_z1": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+        "Cyl_tmp_z2": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+        "Cyl_tmp_z3": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+        "Cyl_tmp_z4": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+        "Cyl_tmp_z5": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+        "Shot_size": {"tolerance": 3.0, "unit": "mm", "weight": 0.20, "critical": True},
+        "Ejector_fix_deviation_torque": {"tolerance": 2.0, "unit": "Nm", "weight": 0.15, "critical": True},
+        "Cyl_tmp_z8": {"tolerance": 5, "unit": "°C", "weight": 0.01, "critical": False},
+    }
+    
+    source = CSV_V2_PATH if os.path.exists(CSV_V2_PATH) else CSV_PATH
+    if os.path.exists(source):
+        try:
+            df = pd.read_csv(source)
+            # Standardize columns
+            col_map = {str(c).strip().lower(): c for c in df.columns}
+            var_col = col_map.get("variable_name", "variable_name")
+            plus_col = col_map.get("tolerance_plus", "tolerance_plus")
+            minus_col = col_map.get("tolerance_minus", "tolerance_minus")
+            set_col = col_map.get("default_set_value", "default_set_value")
+            part_col = col_map.get("part_number", "part_number")
+            
+            # P1: Filter by part number if provided, otherwise use GLOBAL records
+            if part_number and part_col in df.columns:
+                part_filtered = df[df[part_col] == part_number]
+                if part_filtered.empty:
+                    # Fallback to GLOBAL if part specific record not found
+                    df = df[df[part_col] == "GLOBAL"]
+                else:
+                    df = part_filtered
+            elif part_col in df.columns:
+                df = df[df[part_col] == "GLOBAL"]
+
+            for _, row in df.iterrows():
+                name = str(row.get(var_col, "")).strip()
+                tol_plus = row.get(plus_col)
+                tol_minus = row.get(minus_col)
+                
+                try:
+                    tp = abs(float(tol_plus)) if not pd.isna(tol_plus) else None
+                    tm = abs(float(tol_minus)) if not pd.isna(tol_minus) else None
+                    if tp is not None and tm is not None:
+                        # Use max of the official +/- tolerances for the health score ratio
+                        official_tol = max(tp, tm)
+                        official_set = row.get(set_col)
+                        
+                        if name in base:
+                            base[name]["tolerance"] = official_tol
+                            base[name]["official_setpoint"] = float(official_set) if not pd.isna(official_set) else None
+                        else:
+                            # Add missing sensors found in CSV
+                            base[name] = {
+                                "tolerance": official_tol, 
+                                "unit": "?", 
+                                "weight": 0.05, 
+                                "critical": False,
+                                "official_setpoint": float(official_set) if not pd.isna(official_set) else None
+                            }
+                except (ValueError, TypeError):
+                    continue
+        except Exception as e:
+            print(f"Warning: engine.py failed to load official CSV tolerances: {e}")
+    return base
+
+THRESHOLDS = _load_official_thresholds()
 
 # Industry Domain Logic: Variable Dependency Map
 # Based on "AI_cup_parameter_info.xlsx" + CSV correlation audit
@@ -511,24 +570,56 @@ def stability_history_avg(current: float) -> float:
     # Helper to simulate stability window
     return current # Simplified for now
 
-def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTracker) -> List[Dict[str, Any]]:
+def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTracker, part_number: Optional[str] = None) -> List[Dict[str, Any]]:
+    # P1: Load part-specific thresholds if provided
+    local_thresholds = _load_official_thresholds(part_number) if part_number else THRESHOLDS
     if not drift_tracker.baselines:
         drift_tracker.calibrate(shots)
 
 
     # Initialize and train the Inference Engine
     inference_engine = None
-    target_sensors = [k for k in THRESHOLDS.keys() if THRESHOLDS.get(k, {}).get("critical", False) or True]  # use all sensors
+    excluded_inference_fields = {
+        "Time_on_machine",
+        "Machine_status",
+        "Alrams_array",
+        "Alarms_array",
+        "Scrap_counter",
+        "Shot_counter",
+    }
+    target_sensors = [
+        k for k in THRESHOLDS.keys()
+        if k not in excluded_inference_fields
+    ]
     
     if PredictiveInferenceEngine is not None and len(shots) >= 20:
         # Only train if we have enough historical data
         try:
-            inference_engine = PredictiveInferenceEngine(target_sensors=target_sensors)
             history_df = pd.DataFrame(shots)
-            # Train model
-            success = inference_engine.train(history_df)
-            if not success:
+            target_sensors = [col for col in target_sensors if col in history_df.columns]
+            if len(target_sensors) < 2:
                 inference_engine = None
+                target_sensors = []
+            # Avoid noisy/pointless training when the batch has near-zero variance.
+            numeric_df = history_df[target_sensors].apply(pd.to_numeric, errors="coerce").dropna() if target_sensors else pd.DataFrame()
+            informative_cols = [
+                col for col in target_sensors
+                if col in numeric_df.columns
+                and numeric_df[col].nunique(dropna=True) > 1
+                and float(numeric_df[col].std() or 0.0) > 1e-9
+            ]
+            if len(numeric_df) >= 20 and len(informative_cols) >= 2:
+                inference_engine = PredictiveInferenceEngine(target_sensors=target_sensors)
+            else:
+                inference_engine = None
+
+            if inference_engine is None:
+                pass
+            else:
+            # Train model
+                success = inference_engine.train(history_df)
+                if not success:
+                    inference_engine = None
         except Exception as e:
             print(f"Warning: Could not train inference engine: {e}")
             inference_engine = None
@@ -569,8 +660,9 @@ def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTrack
 
         # Multivariate Anomaly Detection (MAD)
         # Calculates combined 'stat distance' from all parameters
-        raw_deviations = [abs(shot.get(var, 0) - drift_tracker.baselines[var]["mean"]) / THRESHOLDS[var]["tolerance"]
-                          for var in THRESHOLDS.keys() if var in drift_tracker.baselines and isinstance(shot.get(var), (int, float))]
+        # Calculations using dynamic thresholds
+        raw_deviations = [abs(shot.get(var, 0) - drift_tracker.baselines[var]["mean"]) / local_thresholds[var]["tolerance"]
+                          for var in local_thresholds.keys() if var in drift_tracker.baselines and isinstance(shot.get(var), (int, float))]
         anomaly_score = min(1.0, np.mean(raw_deviations)) if raw_deviations else 0.0
 
         p_res = physics_check(shot, drift_tracker.baselines)
@@ -649,6 +741,7 @@ def analyze_shot_sequence(shots: List[Dict[str, Any]], drift_tracker: DriftTrack
                 "safe_min": float(round(baseline["mean"] - threshold["tolerance"], 3)) if threshold and baseline else None,
                 "safe_max": float(round(baseline["mean"] + threshold["tolerance"], 3)) if threshold and baseline else None,
                 "setpoint": float(round(baseline["mean"], 3)) if baseline else None,
+                "official_setpoint": threshold.get("official_setpoint") if threshold else None,
                 "velocity": float(round(drift_velocity, 6)) if isinstance(drift_velocity, (int, float)) else 0.0,
                 "acceleration": float(round(drift_acceleration, 6)) if isinstance(drift_acceleration, (int, float)) else 0.0,
                 "ttqt": float(round(ttqt_cycles, 2)) if isinstance(ttqt_cycles, (int, float)) else 999.0,

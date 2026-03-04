@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Sidebar from './components/Sidebar';
 import Header from './components/Header';
-import DashboardView from './views/view';
+import PredictiveDashboard from './views/Dashboard';
 import EngineerView from './views/EngineerView';
 import ManagerView from './views/ManagerView';
 import AlertCenter from './views/AlertCenter';
@@ -20,15 +20,14 @@ function App() {
 
   // Load real data from backend on startup
   useEffect(() => {
-    const store = useTelemetryStore.getState();
-    void store.bootstrap();
+    void useTelemetryStore.getState().bootstrap();
     let monitorInFlight = false;
 
     const monitor = setInterval(async () => {
       if (monitorInFlight) return;
       monitorInFlight = true;
-      const state = useTelemetryStore.getState();
       try {
+        const state = useTelemetryStore.getState();
         const health = await state.checkBackendHealth();
         if (!health) return;
 
@@ -36,6 +35,8 @@ function App() {
         const machinesStale = now - (state.lastMachinesRefreshAt || 0) > 30000;
         const cyclesStale = now - (state.lastCyclesRefreshAt || 0) > 25000;
         const controlRoomStale = now - (state.lastControlRoomRefreshAt || 0) > 90000;
+        const chartDataStale = now - (state.lastChartDataRefreshAt || 0) > 60000;
+        const fleetChartStale = now - (state.lastFleetChartDataRefreshAt || 0) > 90000;
         const aiMetricsStale = now - (state.lastAiMetricsRefreshAt || 0) > 120000;
 
         if (machinesStale) {
@@ -55,6 +56,15 @@ function App() {
           await state.loadControlRoom(state.currentMachine, state.partNumber);
         }
 
+        if (chartDataStale || !state.chartData) {
+          const activeHorizon = Number(state.chartData?.meta?.horizon_used_minutes || 60);
+          await state.loadChartData(state.currentMachine, state.partNumber, activeHorizon);
+        }
+
+        if (fleetChartStale || !state.fleetChartData) {
+          await state.loadFleetChartData(60);
+        }
+
         if (aiMetricsStale || !state.aiMetrics) {
           await state.loadAiMetrics();
         }
@@ -72,12 +82,12 @@ function App() {
 
   const renderView = () => {
     switch (activeView) {
-      case 'operator': return <DashboardView onNav={handleNav} />;
+      case 'operator': return <PredictiveDashboard />;
       case 'engineer': return <EngineerView />;
       case 'manager': return <ManagerView />;
       case 'alerts': return <AlertCenter onNav={handleNav} />;
       case 'audit': return <AuditLog />;
-      default: return <DashboardView onNav={handleNav} />;
+      default: return <PredictiveDashboard />;
     }
   };
 

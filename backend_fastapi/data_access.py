@@ -40,24 +40,9 @@ MAX_HISTORY_ROWS = 240
 DEFAULT_HORIZON_MINUTES = (30, 240, 1440)
 EPS = 1e-9
 
-# === CSV Audit: all 25 variables found in M231-11.csv ===
+# CSV Audit: all 25 variables found in M231-11.csv
 # New high-correlation variables added: Shot_size (0.9999), Ejector_fix_deviation_torque (0.990)
 # Flatline/dead sensors (std==0): Cyl_tmp_z2, Cyl_tmp_z6, Cyl_tmp_z7, Extruder_torque (still mapped for telemetry)
-# Standard thresholds from AI_cup_parameter_info
-STANDARD_THRESHOLDS: Dict[str, Dict[str, float]] = {
-    "cushion": {"min": -0.5, "max": 0.5},           # +/- 0.5 mm (applied as delta or absolute depending on setpoint)
-    "injection_time": {"min": -0.03, "max": 0.03},  # +/- 0.03 s
-    "dosage_time": {"min": -1.0, "max": 1.0},      # +/- 1 s
-    "injection_pressure": {"min": -100.0, "max": 100.0}, # +/- 100 bar
-    "switch_pressure": {"min": -100.0, "max": 100.0},    # +/- 100 bar
-    "temp_z1": {"min": -5.0, "max": 5.0},          # +/- 5 °C
-    "temp_z2": {"min": -5.0, "max": 5.0},
-    "temp_z3": {"min": -5.0, "max": 5.0},
-    "temp_z4": {"min": -5.0, "max": 5.0},
-    "temp_z5": {"min": -5.0, "max": 5.0},
-    "temp_z8": {"min": -5.0, "max": 5.0},
-    "switch_position": {"min": -0.05, "max": 0.05}, # +/- 0.05 mm
-}
 
 RAW_TO_FRONTEND_SENSOR_MAP: Dict[str, str] = {
     "Cushion": "cushion",
@@ -319,6 +304,11 @@ def telemetry_to_sensor_row(telemetry: Dict[str, Any]) -> Dict[str, float]:
     if not isinstance(telemetry, dict):
         return row
 
+    # Backward compatibility: some stored rows embed telemetry as
+    # {"telemetry": {...}, "predictions": ...}.
+    if isinstance(telemetry.get("telemetry"), dict):
+        telemetry = telemetry.get("telemetry") or {}
+
     for key, payload in telemetry.items():
         raw_name = FRONTEND_TO_RAW_SENSOR_MAP.get(str(key), str(key))
 
@@ -573,14 +563,9 @@ def _generate_future_horizon(
     state_buffer = history_window.iloc[-(num_lags + 1) :].to_numpy(dtype=float).tolist()
     sensor_index = {sensor: idx for idx, sensor in enumerate(sensor_columns)}
     input_row = np.zeros((1, len(input_features)), dtype=float)
-    input_frame: Optional[pd.DataFrame] = None
-    if hasattr(model, "feature_names_in_") or (
-        hasattr(model, "estimators_")
-        and isinstance(getattr(model, "estimators_"), list)
-        and len(getattr(model, "estimators_", [])) > 0
-        and hasattr(getattr(model, "estimators_")[0], "feature_names_in_")
-    ):
-        input_frame = pd.DataFrame(np.zeros((1, len(input_features)), dtype=float), columns=input_features)
+    # Always use a named DataFrame for inference to avoid sklearn/lightgbm
+    # "X does not have valid feature names" warnings.
+    input_frame = pd.DataFrame(np.zeros((1, len(input_features)), dtype=float), columns=input_features)
 
     latest_state = history_window.iloc[-1].to_dict()
     future_records: List[Dict[str, Any]] = []
@@ -606,12 +591,19 @@ def _generate_future_horizon(
                 else:
                     input_row[0, col_idx] = 0.0
 
-            model_input: Any = input_row
-            if input_frame is not None:
-                input_frame.iloc[0, :] = input_row[0, :]
-                model_input = input_frame
-
-            raw_pred = model.predict(model_input)
+            input_frame.iloc[0, :] = input_row[0, :]
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"X does not have valid feature names, but LGBMRegressor was fitted with feature names",
+                    category=UserWarning,
+                )
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+                    category=UserWarning,
+                )
+                raw_pred = model.predict(input_frame)
             pred_vector = np.asarray(raw_pred).reshape(-1)
             if pred_vector.size < len(sensor_columns):
                 raise ValueError(
@@ -1233,6 +1225,7 @@ def build_future_timeline(
             limits = safe_limits.get(column)
             safe_min = _to_float((limits or {}).get("min"))
             safe_max = _to_float((limits or {}).get("max"))
+            official_setpoint = _to_float((limits or {}).get("official_setpoint"))
             setpoint = None
             if safe_min is not None and safe_max is not None:
                 setpoint = (safe_min + safe_max) / 2.0
@@ -1242,6 +1235,7 @@ def build_future_timeline(
                 "safe_min": float(round(safe_min, 4)) if safe_min is not None else None,
                 "safe_max": float(round(safe_max, 4)) if safe_max is not None else None,
                 "setpoint": float(round(setpoint, 4)) if setpoint is not None else None,
+                "official_setpoint": float(round(official_setpoint, 4)) if official_setpoint is not None else None,
             }
 
         scrap_probability = _to_float(row.get("scrap_probability")) or 0.0

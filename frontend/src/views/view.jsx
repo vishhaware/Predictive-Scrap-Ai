@@ -8,6 +8,7 @@ import {
     RadialBarChart, RadialBar, PolarAngleAxis, ResponsiveContainer,
 } from 'recharts';
 import { Thermometer, Gauge, Zap, Activity } from 'lucide-react';
+import ViolationBanner from '../components/ViolationBanner';
 
 export default function DashboardView({ onNav }) {
     const latest = useTelemetryStore(s => s.latest);
@@ -148,6 +149,13 @@ export default function DashboardView({ onNav }) {
     const partFilterMessage = typeof controlRoom?.part_filter_message === 'string'
         ? controlRoom.part_filter_message
         : '';
+    const partFilterCycleStart = controlRoom?.part_filter_cycle_start;
+    const partFilterCycleEnd = controlRoom?.part_filter_cycle_end;
+    const partInDateWindow = Boolean(controlRoom?.part_number_in_date_window);
+    const controlRoomPartOptions = Array.isArray(controlRoom?.part_options)
+        ? controlRoom.part_options.filter(Boolean)
+        : [];
+    const effectivePartOptions = controlRoomPartOptions.length > 0 ? controlRoomPartOptions : partOptions;
     const modelFamily = controlRoom?.model_family || latest?.predictions?.model_family || 'legacy';
     const segmentScope = controlRoom?.segment_scope || latest?.predictions?.segment_scope || 'global';
     const featureSpecHash = controlRoom?.feature_spec_hash || latest?.predictions?.feature_spec_hash || '';
@@ -158,11 +166,22 @@ export default function DashboardView({ onNav }) {
         ? 'Machine + Part'
         : 'Machine Fallback';
 
+    // P1: Calculate violating parameters for the banner
+    const violatingParams = stats.filter(({ key, label }) => {
+        const p = tele[key];
+        if (!p) return false;
+        const isOk = (p.safe_min === null || p.value >= p.safe_min) && (p.safe_max === null || p.value <= p.safe_max);
+        return !isOk;
+    }).map(s => ({ key: s.key, label: s.label }));
+
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
 
             {/* Active alert banner */}
             {topAlert && <AlertBanner alert={topAlert} onNav={onNav} />}
+
+            {/* P1: Process Violation Banner */}
+            <ViolationBanner violations={violatingParams} machineId={currentMachine} />
 
             {/* Top row */}
             <div style={{ display: 'grid', gridTemplateColumns: '320px 1fr', gap: 'var(--space-5)' }}>
@@ -244,7 +263,16 @@ export default function DashboardView({ onNav }) {
                         {stats.map(({ label, key, icon, unit, priority }) => {
                             const param = tele[key];
                             if (!param) return null;
-                            const { value, safe_min, safe_max } = param;
+                            const useHistoricalBaseline = useTelemetryStore.getState().useHistoricalBaseline;
+                            const hSet = param.setpoint;
+                            const aSet = param.official_setpoint ?? hSet;
+                            const curSet = useHistoricalBaseline ? hSet : aSet;
+
+                            const tol = (param.safe_max !== null && hSet !== null) ? (param.safe_max - hSet) : 0;
+                            const safe_min = useHistoricalBaseline ? param.safe_min : (curSet !== null ? curSet - tol : null);
+                            const safe_max = useHistoricalBaseline ? param.safe_max : (curSet !== null ? curSet + tol : null);
+
+                            const { value, velocity } = param;
                             const ok = (safe_min === null || value >= safe_min) && (safe_max === null || value <= safe_max);
                             const lvl = ok ? 'ok' : 'crit';
                             return (
@@ -252,9 +280,17 @@ export default function DashboardView({ onNav }) {
                                     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
                                         {React.createElement(icon, { size: 16, color: ok ? 'var(--status-ok)' : 'var(--status-crit)' })}
                                         <div className="stat-label">{label}</div>
+                                        <div style={{ marginLeft: 'auto', fontSize: 8, fontWeight: 900, color: (Date.now() - new Date(latest?.timestamp).getTime()) > 30000 ? 'var(--status-crit)' : 'var(--status-ok)', letterSpacing: '0.05em' }}>
+                                            {(Date.now() - new Date(latest?.timestamp).getTime()) > 30000 ? 'STALE' : 'LIVE'}
+                                        </div>
                                     </div>
-                                    <div className="stat-value" style={{ fontSize: 30, color: ok ? 'var(--text-primary)' : 'var(--status-crit)' }}>
+                                    <div className="stat-value" style={{ fontSize: 30, color: ok ? 'var(--text-primary)' : 'var(--status-crit)', display: 'flex', alignItems: 'baseline', gap: 6 }}>
                                         {value}<span className="stat-unit">{unit}</span>
+                                        {velocity !== 0 && (
+                                            <span style={{ fontSize: 10, color: Math.abs(velocity) > 0.1 ? 'var(--status-warn)' : 'var(--text-muted)', fontWeight: 700, fontFamily: 'JetBrains Mono' }}>
+                                                {velocity > 0 ? '↑' : '↓'} {Math.abs(velocity).toFixed(3)}
+                                            </span>
+                                        )}
                                     </div>
                                     {safe_min !== null && safe_max !== null && (
                                         <div style={{ marginTop: 8 }}>
@@ -281,17 +317,22 @@ export default function DashboardView({ onNav }) {
                             {controlRoom?.generated_at && (
                                 <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end' }}>
                                     <span style={{ fontSize: 10, color: 'var(--text-muted)', fontWeight: 600 }}>
-                                        DATA UP TO: {history.length > 0 ? new Date(history[history.length - 1].timestamp).toLocaleString() : '---'}
+                                        DATA UP TO: {partFilterCycleEnd ? new Date(partFilterCycleEnd).toLocaleString() : (history.length > 0 ? new Date(history[history.length - 1].timestamp).toLocaleString() : '---')}
                                     </span>
                                     <span style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 500 }}>
                                         FORECAST GENERATED: {new Date(controlRoom.generated_at).toLocaleTimeString()} (32h / 4 Shifts)
                                     </span>
+                                    {partFilterCycleStart && partFilterCycleEnd ? (
+                                        <span style={{ fontSize: 9, color: 'var(--text-muted)', fontWeight: 500 }}>
+                                            PART DATE RANGE: {new Date(partFilterCycleStart).toLocaleString()} to {new Date(partFilterCycleEnd).toLocaleString()}
+                                        </span>
+                                    ) : null}
                                 </div>
                             )}
                             <span className="badge badge-neutral">{currentMachine}</span>
                         </div>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: 8, marginBottom: 10 }}>
-                            {partOptions.length > 0 ? (
+                            {effectivePartOptions.length > 0 ? (
                                 <select
                                     value={partNumber}
                                     onChange={(e) => {
@@ -308,7 +349,7 @@ export default function DashboardView({ onNav }) {
                                         color: 'var(--text-primary)'
                                     }}
                                 >
-                                    {partOptions.map((pn) => (
+                                    {effectivePartOptions.map((pn) => (
                                         <option key={pn} value={pn}>{pn}</option>
                                     ))}
                                 </select>
@@ -351,6 +392,11 @@ export default function DashboardView({ onNav }) {
                             <span className="badge badge-neutral">
                                 Cycles: {partFilterMatchedCycles}/{partFilterTotalCycles}
                             </span>
+                            {!partInDateWindow && partNumber ? (
+                                <span className="badge badge-warn">
+                                    Selected part not active in current date window
+                                </span>
+                            ) : null}
                             {partFilterMessage ? (
                                 <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>{partFilterMessage}</span>
                             ) : null}

@@ -35,6 +35,49 @@ engine = create_engine(
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
+
+def _sqlite_table_exists(conn, table_name: str) -> bool:
+    rows = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='table' AND name=:table_name"),
+        {"table_name": table_name},
+    ).fetchall()
+    return bool(rows)
+
+
+def _sqlite_table_columns(conn, table_name: str):
+    return [row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()]
+
+
+def _apply_sqlite_compat_migrations():
+    """
+    Lightweight compatibility migrations for SQLite installations where
+    create_all(checkfirst=True) cannot add newly introduced columns.
+    """
+    if not IS_SQLITE:
+        return
+
+    machine_stats_columns = {
+        "last_status": "VARCHAR DEFAULT 'ok'",
+        "last_oee": "INTEGER DEFAULT 0",
+        "last_temp": "FLOAT DEFAULT 230.0",
+        "last_cushion": "FLOAT DEFAULT 0.0",
+        "last_cycles_count": "INTEGER DEFAULT 0",
+        "abnormal_params": "JSON",
+        "maintenance_urgency": "VARCHAR DEFAULT 'LOW'",
+        "last_part_number": "VARCHAR",
+    }
+
+    with engine.begin() as conn:
+        if not _sqlite_table_exists(conn, "machine_stats"):
+            return
+
+        existing = set(_sqlite_table_columns(conn, "machine_stats"))
+        for column_name, column_sql in machine_stats_columns.items():
+            if column_name in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE machine_stats ADD COLUMN {column_name} {column_sql}"))
+            print(f"🛠️ SQLite migration: added machine_stats.{column_name}")
+
 def force_rebuild_engine():
     """If not connected, rebuilds the connection engine entirely."""
     global engine, SessionLocal
@@ -89,6 +132,7 @@ def init_db():
         if not check_db_connection():
             print("⚠ Database not reachable at startup. Attempting creation anyway...")
         Base.metadata.create_all(bind=engine, checkfirst=True)
+        _apply_sqlite_compat_migrations()
     except OperationalError as exc:
         if "already exists" in str(exc).lower():
             print("⚠ DB init race detected (table already exists). Continuing startup.")

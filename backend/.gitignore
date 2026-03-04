@@ -1,7 +1,0 @@
-node_modules/
-*.log
-factory_brain.db
-factory_brain.db-shm
-factory_brain.db-wal
-.env
-.env.*

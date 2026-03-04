@@ -1,9 +1,9 @@
-import { useMemo } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useTelemetryStore } from '../store/useTelemetryStore';
 import { t } from '../utils/i18n';
 import {
     BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-    LineChart, Line, Legend,
+    LineChart, Line, Legend, ReferenceLine,
 } from 'recharts';
 import { TrendingDown, TrendingUp, Award, AlertCircle } from 'lucide-react';
 
@@ -11,6 +11,12 @@ export default function ManagerView() {
     const machines = useTelemetryStore(s => s.machines);
     const history = useTelemetryStore(s => s.history);
     const aiMetrics = useTelemetryStore(s => s.aiMetrics);
+    const fleetChartData = useTelemetryStore(s => s.fleetChartData);
+    const fleetChartDataLoading = useTelemetryStore(s => s.fleetChartDataLoading);
+
+    useEffect(() => {
+        void useTelemetryStore.getState().loadFleetChartData(60);
+    }, []);
 
     const fleetMetrics = aiMetrics?.fleet_metrics || null;
     const perMachineMetrics = Array.isArray(aiMetrics?.per_machine) ? aiMetrics.per_machine : [];
@@ -106,11 +112,102 @@ export default function ManagerView() {
         prob: h.predictions?.scrap_probability * 100 || 0
     }));
 
+    const fleetTimeline = useMemo(() => {
+        const past = Array.isArray(fleetChartData?.past) ? fleetChartData.past : [];
+        const future = Array.isArray(fleetChartData?.future) ? fleetChartData.future : [];
+        const byTs = new Map();
+
+        past.forEach((row) => {
+            const ts = row?.timestamp;
+            if (!ts) return;
+            if (!byTs.has(ts)) byTs.set(ts, { timestamp: ts, pastPct: null, futurePct: null });
+            byTs.get(ts).pastPct = Number(row?.scrap_pct || 0);
+        });
+        future.forEach((row) => {
+            const ts = row?.timestamp;
+            if (!ts) return;
+            if (!byTs.has(ts)) byTs.set(ts, { timestamp: ts, pastPct: null, futurePct: null });
+            byTs.get(ts).futurePct = Number(row?.scrap_pct || 0);
+        });
+
+        const rows = Array.from(byTs.values()).sort(
+            (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime(),
+        );
+        return {
+            rows,
+            seamTs: fleetChartData?.meta?.past_last_ts || null,
+            meta: fleetChartData?.meta || null,
+        };
+    }, [fleetChartData]);
+
+    const topFutureRiskMachines = useMemo(() => {
+        const rows = Array.isArray(fleetChartData?.per_machine) ? fleetChartData.per_machine.slice() : [];
+        return rows
+            .sort((a, b) => Number(b?.future_peak_scrap_prob || 0) - Number(a?.future_peak_scrap_prob || 0))
+            .slice(0, 5);
+    }, [fleetChartData]);
+
     const STATUS_LABEL = { ok: 'Nominal', warn: 'Drift Warning', crit: 'Critical' };
     const statusColor = { ok: 'var(--status-ok)', warn: 'var(--status-warn)', crit: 'var(--status-crit)' };
 
     return (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+            <div className="card">
+                <div className="card-header">
+                    <span className="card-title-large">Fleet Past/Future Scrap Timeline</span>
+                    <span className="badge badge-info">Past = observed · Future = forecast</span>
+                </div>
+                {fleetChartDataLoading && fleetTimeline.rows.length === 0 ? (
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>Loading fleet chart data...</div>
+                ) : (
+                    <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 'var(--space-4)' }}>
+                        <div style={{ height: 220 }}>
+                            <ResponsiveContainer width="100%" height="100%">
+                                <LineChart data={fleetTimeline.rows} margin={{ top: 8, right: 16, left: 0, bottom: 0 }}>
+                                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                                    <XAxis
+                                        dataKey="timestamp"
+                                        tick={{ fontSize: 10, fill: '#64748b' }}
+                                        tickLine={false}
+                                        axisLine={false}
+                                        tickFormatter={(value) => new Date(value).toLocaleTimeString()}
+                                    />
+                                    <YAxis domain={[0, 100]} tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} tickFormatter={(v) => `${v}%`} />
+                                    <Tooltip
+                                        contentStyle={{ background: 'var(--bg-surface)', border: '1px solid var(--border-default)', borderRadius: 10, fontSize: 12, boxShadow: 'var(--shadow-card)' }}
+                                        formatter={(value, name) => [`${Number(value || 0).toFixed(2)}%`, name]}
+                                        labelFormatter={(label) => new Date(label).toLocaleString()}
+                                    />
+                                    <Legend wrapperStyle={{ fontSize: 11 }} />
+                                    {fleetTimeline.seamTs && (
+                                        <ReferenceLine x={fleetTimeline.seamTs} stroke="#dc2626" strokeDasharray="4 4" label={{ value: 'Past -> Future seam', position: 'insideTopRight', fontSize: 10 }} />
+                                    )}
+                                    <Line type="monotone" dataKey="pastPct" name="Scrap Probability (Past)" stroke="#0B3D91" strokeWidth={2.5} dot={false} connectNulls />
+                                    <Line type="monotone" dataKey="futurePct" name="Scrap Probability (Forecast)" stroke="#F97316" strokeWidth={2.5} strokeDasharray="6 4" dot={false} connectNulls />
+                                </LineChart>
+                            </ResponsiveContainer>
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                            <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)' }}>Top predicted risk machines</div>
+                            {topFutureRiskMachines.length === 0 ? (
+                                <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>No fleet forecast data available.</div>
+                            ) : topFutureRiskMachines.map((row) => (
+                                <div key={row.machine_id} style={{ display: 'flex', justifyContent: 'space-between', padding: '8px 10px', borderRadius: 8, background: 'var(--bg-elevated)', fontSize: 12 }}>
+                                    <span style={{ fontWeight: 700 }}>{row.machine_id}</span>
+                                    <span style={{ color: 'var(--status-crit)', fontFamily: 'JetBrains Mono, monospace' }}>
+                                        {(Number(row.future_peak_scrap_prob || 0) * 100).toFixed(1)}%
+                                    </span>
+                                </div>
+                            ))}
+                            {fleetTimeline.meta && (
+                                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)' }}>
+                                    Seam: {fleetTimeline.meta.seam_ok ? 'OK' : 'CHECK'} · Ingestion: {fleetTimeline.meta.latest_ingestion_time ? new Date(fleetTimeline.meta.latest_ingestion_time).toLocaleString() : 'N/A'}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
 
             {/* KPI row */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 'var(--space-4)' }}>

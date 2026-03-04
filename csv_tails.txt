@@ -1,5 +1,0 @@
-M231-11.csv: "be714-em63-multi-client","M231-11","Ejector_fix_deviation_torque","19.2","2026-01-15 21:17:50.000000",,"be714-em63-multi-client","M231-11","2026","01","2026-01-15"
-M356-57.csv: "be714-em63-multi-client","M356-57","Ejector_fix_deviation_torque","1.3","2026-02-02 11:46:01.000000",,"be714-em63-multi-client","M356-57","2026","02","2026-02-02"
-M471-23.csv: "be714-em63-multi-client","M471-23","Ejector_fix_deviation_torque","-4.8","2026-02-12 07:51:10.000000",,"be714-em63-multi-client","M471-23","2026","02","2026-02-12"
-M607-30.csv: "be714-em63-multi-client","M607-30","Ejector_fix_deviation_torque","-4","2026-02-02 23:18:50.000000",,"be714-em63-multi-client","M607-30","2026","02","2026-02-02"
-M612-33.csv: "be714-em63-multi-client","M612-33","Ejector_fix_deviation_torque","-2.1","2026-01-28 00:33:30.000000",,"be714-em63-multi-client","M612-33","2026","01","2026-01-27"

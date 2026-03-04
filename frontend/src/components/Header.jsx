@@ -19,6 +19,10 @@ export default function Header({ activeView }) {
     const backendStatus = useTelemetryStore(s => s.backendStatus);
     const backendInfo = useTelemetryStore(s => s.backendInfo);
     const switchMachine = useTelemetryStore(s => s.switchMachine);
+    const setPartNumber = useTelemetryStore(s => s.setPartNumber);
+    const partOptions = useTelemetryStore(s => s.partOptions);
+    const useHistoricalBaseline = useTelemetryStore(s => s.useHistoricalBaseline);
+    const setUseHistoricalBaseline = useTelemetryStore(s => s.setUseHistoricalBaseline);
 
     const prob = latest?.predictions?.scrap_probability ?? 0;
     const level = prob >= 0.9 ? 'crit' : prob >= 0.65 ? 'warn' : 'ok';
@@ -103,7 +107,9 @@ export default function Header({ activeView }) {
                     ))}
                 </select>
                 <span style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Part:</span>
-                <span
+                <select
+                    value={partNumber}
+                    onChange={(e) => setPartNumber(e.target.value)}
                     style={{
                         background: 'var(--bg-elevated)',
                         border: '1px solid var(--border-default)',
@@ -112,11 +118,41 @@ export default function Header({ activeView }) {
                         fontSize: 12,
                         fontWeight: 700,
                         color: 'var(--text-primary)',
+                        cursor: 'pointer',
+                        outline: 'none',
                         fontFamily: 'JetBrains Mono, monospace'
                     }}
                 >
-                    {partNumber || 'AUTO'}
-                </span>
+                    {partOptions.length > 0 ? (
+                        partOptions.map(p => (
+                            <option key={p} value={p}>{p}</option>
+                        ))
+                    ) : (
+                        <option value="">{partNumber || 'AUTO'}</option>
+                    )}
+                </select>
+            </div>
+
+            {/* Baseline Toggle */}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg-elevated)', padding: '3px 4px', borderRadius: 'var(--radius-md)', border: '1px solid var(--border-subtle)' }}>
+                <button
+                    onClick={() => setUseHistoricalBaseline(true)}
+                    style={{
+                        padding: '4px 10px', fontSize: 10, fontWeight: 700, borderRadius: 'var(--radius-sm)', border: 'none', cursor: 'pointer',
+                        background: useHistoricalBaseline ? 'var(--accent-blue)' : 'transparent',
+                        color: useHistoricalBaseline ? '#fff' : 'var(--text-muted)',
+                        transition: 'all 0.2s'
+                    }}
+                >HISTORICAL</button>
+                <button
+                    onClick={() => setUseHistoricalBaseline(false)}
+                    style={{
+                        padding: '4px 10px', fontSize: 10, fontWeight: 700, borderRadius: 'var(--radius-sm)', border: 'none', cursor: 'pointer',
+                        background: !useHistoricalBaseline ? 'var(--status-ok)' : 'transparent',
+                        color: !useHistoricalBaseline ? '#fff' : 'var(--text-muted)',
+                        transition: 'all 0.2s'
+                    }}
+                >ACTIVE</button>
             </div>
 
             {/* Connection */}

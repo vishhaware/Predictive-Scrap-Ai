@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 import lightgbm as lgb
 from sklearn.multioutput import MultiOutputRegressor
@@ -27,11 +26,17 @@ class PredictiveInferenceEngine:
             max_depth=5,
             subsample=0.8,
             colsample_bytree=0.8,
+            min_child_samples=5,
+            min_data_in_bin=1,
+            min_split_gain=0.0,
+            verbose=-1,
+            verbosity=-1,
             n_jobs=-1,      # Use all available CPU cores
             random_state=42
         )
         self.model = MultiOutputRegressor(base_estimator)
         self.is_trained = False
+        self.feature_sensors = list(target_sensors)
 
     def train(self, history_df: pd.DataFrame) -> bool:
         """
@@ -51,6 +56,7 @@ class PredictiveInferenceEngine:
         # Prepare the dataset
         # We want to use the current state (X_t) to predict the next state (y_{t+1})
         df = history_df[self.target_sensors].copy()
+        df = df.apply(pd.to_numeric, errors="coerce")
         
         # Drop rows with NaNs to ensure clean training data
         df = df.dropna()
@@ -59,10 +65,23 @@ class PredictiveInferenceEngine:
             # Require at least 20 historical points to train a meaningful model
             return False
             
+        # Keep only informative input features. LightGBM cannot learn from
+        # all-constant/all-missing columns and emits noisy warnings.
+        self.feature_sensors = [
+            col for col in self.target_sensors
+            if df[col].nunique(dropna=True) > 1 and float(df[col].std() or 0.0) > 1e-9
+        ]
+        if len(self.feature_sensors) < 2:
+            self.is_trained = False
+            return False
+
         # X: Current State ($t$)
         # y: Next State ($t+1$)
-        X = df.iloc[:-1].values
-        y = df.shift(-1).dropna().values
+        X = df[self.feature_sensors].iloc[:-1]
+        y = df[self.target_sensors].shift(-1).dropna()
+        if len(X) == 0 or len(y) == 0:
+            self.is_trained = False
+            return False
         
         # Fit the MultiOutputRegressor
         self.model.fit(X, y)
@@ -84,12 +103,14 @@ class PredictiveInferenceEngine:
             raise RuntimeError("Model must be trained before calling predict_future()")
             
         # Validate current state
-        missing_cols = [col for col in self.target_sensors if col not in current_state]
+        missing_cols = [col for col in self.feature_sensors if col not in current_state]
         if missing_cols:
             raise ValueError(f"Current state is missing required sensors: {missing_cols}")
             
-        # Convert state to a 1D NumPy array in the correct feature order
-        current_x = np.array([current_state[sensor] for sensor in self.target_sensors]).reshape(1, -1)
+        # Convert state to a 1-row frame in the trained feature order.
+        current_x = pd.DataFrame([{
+            sensor: float(current_state[sensor]) for sensor in self.feature_sensors
+        }])
         
         predictions = []
         
@@ -104,6 +125,8 @@ class PredictiveInferenceEngine:
             
             # 3. Recursive magic: Feed the prediction back in as the "current input"
             # for the next iteration of the loop.
-            current_x = next_step_pred
+            current_x = pd.DataFrame([{
+                sensor: float(pred_dict[sensor]) for sensor in self.feature_sensors
+            }])
             
         return predictions

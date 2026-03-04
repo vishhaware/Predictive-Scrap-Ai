@@ -11,9 +11,13 @@
     "test": "node --test src/store/useTelemetryStore.test.js"
   },
   "dependencies": {
+    "@esbuild/win32-x64": "^0.27.3",
+    "esbuild": "^0.27.3",
     "lucide-react": "^0.575.0",
+    "plotly.js-dist-min": "^3.0.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
+    "react-plotly.js": "^2.6.0",
     "react-router-dom": "^7.13.1",
     "recharts": "^3.7.0",
     "zustand": "^5.0.11"

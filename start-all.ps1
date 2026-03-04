@@ -2,6 +2,7 @@ param(
     [ValidateRange(1, 65535)][int]$BackendPort = 8000,
     [ValidateRange(1, 65535)][int]$FrontendPort = 5173,
     [switch]$RunAudit,
+    [switch]$RunExtendedChecks,
     [switch]$InstallDeps,
     [switch]$NoPortCleanup,
     [switch]$OpenBrowser,
@@ -33,7 +34,7 @@ function Get-ListeningPids {
     $allPids = @()
     foreach ($port in ($Ports | Select-Object -Unique)) {
         try {
-            $pids = Get-NetTCPConnection -LocalPort $port -ErrorAction Stop |
+            $pids = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
                 Select-Object -ExpandProperty OwningProcess -Unique
             $allPids += $pids
         }
@@ -52,6 +53,77 @@ function Get-ListeningPids {
         }
     }
     return @($allPids | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+}
+
+function Test-PortListening {
+    param([int]$Port)
+    $Port = [int](@($Port) | Select-Object -First 1)
+    try {
+        $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop
+        if ($listener) { return $true }
+    }
+    catch {}
+
+    try {
+        $match = netstat -ano | Select-String -Pattern "[:\.]$Port\s+.*LISTENING"
+        return $null -ne $match
+    }
+    catch {}
+    return $false
+}
+
+function Resolve-FrontendPort {
+    param([int]$PreferredPort)
+    $basePort = [int](@($PreferredPort) | Select-Object -First 1)
+
+    if (-not (Test-PortListening -Port $basePort)) {
+        return $basePort
+    }
+
+    $fallbacks = @(
+        ($basePort + 1),
+        5174,
+        5175,
+        3000,
+        3001,
+        4173
+    ) | Select-Object -Unique
+    foreach ($candidate in $fallbacks) {
+        $candidatePort = [int](@($candidate) | Select-Object -First 1)
+        if ($candidatePort -le 0 -or $candidatePort -gt 65535) { continue }
+        if (-not (Test-PortListening -Port $candidatePort)) {
+            return $candidatePort
+        }
+    }
+
+    throw "Unable to find an available frontend port near $basePort."
+}
+
+function Resolve-BackendPort {
+    param([int]$PreferredPort)
+    $basePort = [int](@($PreferredPort) | Select-Object -First 1)
+
+    if (-not (Test-PortListening -Port $basePort)) {
+        return $basePort
+    }
+
+    $fallbacks = @(
+        ($basePort + 1),
+        ($basePort + 2),
+        8001,
+        8002,
+        18010,
+        18011
+    ) | Select-Object -Unique
+    foreach ($candidate in $fallbacks) {
+        $candidatePort = [int](@($candidate) | Select-Object -First 1)
+        if ($candidatePort -le 0 -or $candidatePort -gt 65535) { continue }
+        if (-not (Test-PortListening -Port $candidatePort)) {
+            return $candidatePort
+        }
+    }
+
+    throw "Unable to find an available backend port near $basePort."
 }
 
 function Wait-HttpReady {
@@ -88,6 +160,49 @@ function Wait-HttpReady {
     return $false
 }
 
+function Invoke-JsonGet {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$TimeoutSec = 8
+    )
+    try {
+        return Invoke-RestMethod -Uri $Url -TimeoutSec $TimeoutSec -ErrorAction Stop
+    }
+    catch {
+        try {
+            $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec -ErrorAction Stop
+            if ($resp -and $resp.Content) {
+                return ($resp.Content | ConvertFrom-Json)
+            }
+        }
+        catch {}
+        throw
+    }
+}
+
+function Invoke-JsonGetWithRetry {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [int]$Attempts = 3,
+        [int]$TimeoutSec = 8,
+        [int]$DelaySeconds = 2
+    )
+    $lastError = $null
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            return Invoke-JsonGet -Url $Url -TimeoutSec $TimeoutSec
+        }
+        catch {
+            $lastError = $_
+            if ($i -lt $Attempts) {
+                Start-Sleep -Seconds $DelaySeconds
+            }
+        }
+    }
+    if ($lastError) { throw $lastError }
+    throw "Failed to fetch $Url"
+}
+
 function Stop-ProcessSafe {
     param([int[]]$ProcessIds)
     foreach ($processId in ($ProcessIds | Select-Object -Unique)) {
@@ -95,7 +210,9 @@ function Stop-ProcessSafe {
             Stop-Process -Id $processId -Force -ErrorAction Stop
             Write-Step "Stopped PID $processId" Yellow
         }
-        catch {}
+        catch {
+            Write-Step "[WARN] Could not stop PID $processId ($($_.Exception.Message))" Yellow
+        }
     }
 }
 
@@ -330,6 +447,27 @@ print(json.dumps(report))
     Write-Host "  Tip: run .\start-all.ps1 -ResetIngestionCursor to replay CSV rows from current files." -ForegroundColor DarkGray
 }
 
+function Show-BackendDataSnapshot {
+    param(
+        [string]$BackendUrl
+    )
+    try {
+        $machines = Invoke-JsonGet -Url "$BackendUrl/api/machines" -TimeoutSec 8
+        if (-not $machines) { return }
+        $rows = @($machines)
+        if ($rows.Count -eq 0) { return }
+        $totalCycles = ($rows | Measure-Object -Property cycles -Sum).Sum
+        Write-Host ("Machines loaded: {0}, total cycles in stats: {1}" -f $rows.Count, $totalCycles) -ForegroundColor DarkGray
+        if ([int]$totalCycles -le 0) {
+            Write-Step "[WARN] All machine cycle counters are zero. UI can appear empty until ingestion replays rows." Yellow
+            Write-Host "  Tip: run .\start-all.ps1 -ResetIngestionCursor" -ForegroundColor DarkGray
+        }
+    }
+    catch {
+        Write-Step "[WARN] Could not fetch machine snapshot from backend." Yellow
+    }
+}
+
 $repoRoot = Split-Path -Parent $PSCommandPath
 $backendDir = Join-Path $repoRoot "backend_fastapi"
 $frontendDir = Join-Path $repoRoot "frontend"
@@ -343,9 +481,11 @@ $dataDir = Join-Path $frontendDir "Data"
 $mesWorkbookPath = Join-Path $dataDir "MES_Manufacturing_M-231_M-356_M-471_M-607_M-612.xlsx"
 $machineIds = @("M231-11", "M356-57", "M471-23", "M607-30", "M612-33")
 
-$backendUrl = "http://$backendHost`:$BackendPort"
-$backendWsUrl = "ws://$backendHost`:$BackendPort"
-$dashboardUrl = "http://$frontendHost`:$FrontendPort"
+$resolvedBackendPort = $BackendPort
+$backendUrl = "http://$backendHost`:$resolvedBackendPort"
+$backendWsUrl = "ws://$backendHost`:$resolvedBackendPort"
+$resolvedFrontendPort = $FrontendPort
+$dashboardUrl = "http://$frontendHost`:$resolvedFrontendPort"
 
 $backendProc = $null
 $frontendProc = $null
@@ -412,7 +552,7 @@ try {
     }
 
     if (-not $NoPortCleanup) {
-        $portsToClean = @($BackendPort, $FrontendPort, 5174, 3000, 3001) | Select-Object -Unique
+        $portsToClean = @($BackendPort, $FrontendPort, 8000, 8001, 8002, 5174, 3000, 3001, 4173) | Select-Object -Unique
         Write-Step "[1/5] Releasing ports: $($portsToClean -join ', ')..."
         $stalePids = @(Get-ListeningPids -Ports $portsToClean)
         if ($stalePids.Count -gt 0) {
@@ -423,10 +563,18 @@ try {
         else {
             Write-Step "No stale listeners found." Green
         }
+
     }
     else {
         Write-Step "[1/5] Port cleanup skipped (-NoPortCleanup)." Yellow
     }
+
+    $resolvedBackendPort = Resolve-BackendPort -PreferredPort $BackendPort
+    if ($resolvedBackendPort -ne $BackendPort) {
+        Write-Step "[INFO] Backend port $BackendPort is busy. Using $resolvedBackendPort instead." Yellow
+    }
+    $backendUrl = "http://$backendHost`:$resolvedBackendPort"
+    $backendWsUrl = "ws://$backendHost`:$resolvedBackendPort"
 
     Write-Step "`n[2/5] Starting FastAPI backend..."
 $backendCommand = @"
@@ -434,7 +582,7 @@ Set-Location -LiteralPath '$backendDir'
 `$env:PYTHONUNBUFFERED='1'
 `$env:DATA_DIR='$dataDir'
 `$env:MES_WORKBOOK_PATH='$mesWorkbookPath'
-& '$pythonExe' -m uvicorn main:app --host $backendHost --port $BackendPort
+& '$pythonExe' -m uvicorn main:app --host $backendHost --port $resolvedBackendPort
 "@
     $backendProc = Start-Process -FilePath "powershell" -ArgumentList @("-NoExit", "-Command", $backendCommand) -PassThru
     Start-Sleep -Milliseconds 500
@@ -449,7 +597,7 @@ Set-Location -LiteralPath '$backendDir'
     }
     Write-Step "Backend is healthy." Green
     try {
-        $healthPayload = Invoke-RestMethod -Uri "$backendUrl/api/health" -TimeoutSec 5 -ErrorAction Stop
+        $healthPayload = Invoke-JsonGet -Url "$backendUrl/api/health" -TimeoutSec 5
         if ($healthPayload.details -and $healthPayload.details.data_connectivity) {
             $dc = $healthPayload.details.data_connectivity
             Write-Host ("Data: csv_found={0}/{1}, dir={2}" -f $dc.csv_found, $dc.expected, $dc.data_dir) -ForegroundColor DarkGray
@@ -459,6 +607,32 @@ Set-Location -LiteralPath '$backendDir'
         Write-Step "[WARN] Could not fetch backend health details for summary." Yellow
     }
     Show-IngestionLagHint -PythonExe $pythonExe -BackendDbPath $backendDbPath -DataDir $dataDir -MachineIds $machineIds
+    Show-BackendDataSnapshot -BackendUrl $backendUrl
+
+    Write-Step "[3.2/5] Backend endpoint smoke checks (non-blocking)..."
+    $coreChecksOk = $true
+    try {
+        $null = Invoke-JsonGetWithRetry -Url "$backendUrl/api/machines" -Attempts 2 -TimeoutSec 6 -DelaySeconds 2
+    }
+    catch {
+        $coreChecksOk = $false
+        Write-Step "[WARN] /api/machines is not ready yet. Continuing startup." Yellow
+        Write-Host "  Last error: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    try {
+        $null = Invoke-JsonGetWithRetry -Url "$backendUrl/api/machines/M231-11/cycles?limit=1" -Attempts 2 -TimeoutSec 6 -DelaySeconds 2
+    }
+    catch {
+        $coreChecksOk = $false
+        Write-Step "[WARN] /api/machines/M231-11/cycles is not ready yet. Continuing startup." Yellow
+        Write-Host "  Last error: $($_.Exception.Message)" -ForegroundColor DarkGray
+    }
+    if ($coreChecksOk) {
+        Write-Step "Core backend smoke checks passed." Green
+    }
+    else {
+        Write-Step "[WARN] Backend endpoint smoke checks are warming up; startup will continue." Yellow
+    }
 
     if ($RunAudit) {
         Write-Step "[3.5/5] Running backend integration audit..."
@@ -470,11 +644,17 @@ Set-Location -LiteralPath '$backendDir'
     }
 
     Write-Step "`n[4/5] Starting frontend (Vite) with backend bindings..."
+    $resolvedFrontendPort = Resolve-FrontendPort -PreferredPort $FrontendPort
+    $dashboardUrl = "http://$frontendHost`:$resolvedFrontendPort"
+    if ($resolvedFrontendPort -ne $FrontendPort) {
+        Write-Step "[INFO] Frontend port $FrontendPort is busy. Using $resolvedFrontendPort instead." Yellow
+    }
     $frontendCommand = @"
 Set-Location -LiteralPath '$frontendDir'
 `$env:VITE_BACKEND_URL='$backendUrl'
 `$env:VITE_BACKEND_WS_URL='$backendWsUrl'
-npm run dev -- --host $frontendHost --port $FrontendPort --strictPort
+`$env:VITE_ENABLE_WS_PROXY='true'
+npm run dev -- --host $frontendHost --port $resolvedFrontendPort --strictPort
 "@
     $frontendProc = Start-Process -FilePath "powershell" -ArgumentList @("-NoExit", "-Command", $frontendCommand) -PassThru
     Start-Sleep -Milliseconds 500
@@ -484,11 +664,44 @@ npm run dev -- --host $frontendHost --port $FrontendPort --strictPort
 
     Write-Step "[5/5] Waiting for frontend readiness ($dashboardUrl)..."
     $frontendReady = Wait-HttpReady -Url $dashboardUrl -Attempts 40 -DelaySeconds 1 -AllowAny2xx
+    $frontendProc.Refresh()
+    if ($frontendProc.HasExited) {
+        throw "Frontend process exited before readiness probe completed (code $($frontendProc.ExitCode)). Check frontend terminal output."
+    }
     if (-not $frontendReady) {
         Write-Step "[WARN] Frontend readiness probe timed out. It may still be compiling; check frontend terminal." Yellow
     }
     else {
         Write-Step "Frontend is reachable." Green
+    }
+
+    try {
+        $null = Invoke-JsonGetWithRetry -Url "$dashboardUrl/api/health" -Attempts 3 -TimeoutSec 6 -DelaySeconds 1
+        Write-Step "Frontend proxy check passed (/api/health)." Green
+    }
+    catch {
+        Write-Step "[WARN] Frontend proxy check failed at $dashboardUrl/api/health after retries. Verify Vite proxy binding." Yellow
+    }
+
+    if ($OpenBrowser) {
+        Write-Step "Opening browser: $dashboardUrl"
+        Start-Process $dashboardUrl | Out-Null
+    }
+
+    if ($RunExtendedChecks) {
+        Write-Step "[5.1/5] Extended chart checks (non-blocking)..."
+        try {
+            $null = Invoke-JsonGetWithRetry -Url "$backendUrl/api/machines/M231-11/chart-data?horizon_minutes=60" -Attempts 1 -TimeoutSec 5 -DelaySeconds 1
+            $null = Invoke-JsonGetWithRetry -Url "$backendUrl/api/fleet/chart-data?horizon_minutes=60" -Attempts 1 -TimeoutSec 5 -DelaySeconds 1
+            Write-Step "Extended chart smoke checks passed." Green
+        }
+        catch {
+            Write-Step "[WARN] Extended chart endpoints are still warming up; dashboard should still open." Yellow
+            Write-Host "  Last error: $($_.Exception.Message)" -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Step "[5.1/5] Extended chart checks skipped. Use -RunExtendedChecks to enable." DarkGray
     }
 
     Write-Step "`nStartup complete." Green
@@ -500,11 +713,9 @@ npm run dev -- --host $frontendHost --port $FrontendPort --strictPort
     Write-Host "  curl.exe -sS $backendUrl/api/health" -ForegroundColor DarkGray
     Write-Host "  curl.exe -sS $backendUrl/api/ai/metrics" -ForegroundColor DarkGray
     Write-Host "  curl.exe -sS $backendUrl/api/admin/models" -ForegroundColor DarkGray
+    Write-Host "  curl.exe -sS `"$backendUrl/api/machines/M231-11/chart-data?horizon_minutes=60`"" -ForegroundColor DarkGray
+    Write-Host "  curl.exe -sS `"$backendUrl/api/fleet/chart-data?horizon_minutes=60`"" -ForegroundColor DarkGray
     Write-Host "  curl.exe -sS $dashboardUrl" -ForegroundColor DarkGray
-
-    if ($OpenBrowser) {
-        Start-Process $dashboardUrl | Out-Null
-    }
 
     $state = @{
         started_at = (Get-Date).ToString("o")
@@ -515,10 +726,14 @@ npm run dev -- --host $frontendHost --port $FrontendPort --strictPort
             health = "$backendUrl/api/health"
             data_dir = $dataDir
             mes_workbook = $mesWorkbookPath
+            requested_port = $BackendPort
+            actual_port = $resolvedBackendPort
         }
         frontend = @{
             pid = $frontendProc.Id
             url = $dashboardUrl
+            requested_port = $FrontendPort
+            actual_port = $resolvedFrontendPort
         }
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -Path $stackStatePath -Encoding UTF8
@@ -529,6 +744,9 @@ npm run dev -- --host $frontendHost --port $FrontendPort --strictPort
 }
 catch {
     Write-Step "`n[ERROR] $($_.Exception.Message)" Red
+    if ($_.ScriptStackTrace) {
+        Write-Host $_.ScriptStackTrace -ForegroundColor DarkGray
+    }
     if ($backendProc -and -not $backendProc.HasExited) {
         Write-Step "Stopping backend PID $($backendProc.Id) due to startup failure." Yellow
         Stop-ProcessSafe -ProcessIds @($backendProc.Id)

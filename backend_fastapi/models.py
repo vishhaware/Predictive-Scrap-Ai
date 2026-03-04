@@ -48,3 +48,4 @@ class MachineStats(Base):
     last_cycles_count = Column(Integer, default=0)
     abnormal_params = Column(JSON, default=list)
     maintenance_urgency = Column(String, default="LOW")
+    last_part_number = Column(String)
