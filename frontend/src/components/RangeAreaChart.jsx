@@ -25,6 +25,9 @@ const CustomTooltip = ({ active, payload, unit }) => {
     const safeMin = typeof row?.safeMin === 'number' ? row.safeMin.toFixed(2) : 'N/A';
     const safeMax = typeof row?.safeMax === 'number' ? row.safeMax.toFixed(2) : 'N/A';
     const volatility = typeof row?.volatility6pt === 'number' ? row.volatility6pt.toFixed(3) : '0.000';
+    const hasConfidence = row?.confidenceUpper !== null && row?.confidenceLower !== null;
+    const confidenceUpper = hasConfidence ? row.confidenceUpper.toFixed(3) : null;
+    const confidenceLower = hasConfidence ? row.confidenceLower.toFixed(3) : null;
 
     return (
         <div style={{
@@ -54,6 +57,14 @@ const CustomTooltip = ({ active, payload, unit }) => {
                     <span>OK Range</span>
                     <span style={{ color: 'var(--text-secondary)', fontWeight: 600 }}>{safeMin} - {safeMax}</span>
                 </div>
+                {hasConfidence && (
+                    <div style={{ marginTop: 4, fontSize: 10, color: 'var(--text-muted)' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', color: '#3b82f6' }}>
+                            <span>Confidence Band</span>
+                            <span style={{ fontWeight: 600 }}>{confidenceLower} - {confidenceUpper}</span>
+                        </div>
+                    </div>
+                )}
                 {row?.isForecast && (
                     <div style={{ marginTop: 4, padding: '2px 6px', background: 'var(--status-info-dim)', color: 'var(--status-info)', borderRadius: 4, fontWeight: 700, fontSize: 8, textAlign: 'center' }}>
                         Model label: forecasted
@@ -64,7 +75,16 @@ const CustomTooltip = ({ active, payload, unit }) => {
     );
 };
 
-export default function RangeAreaChart({ history, forecast, param, windowSize = 80 }) {
+export default function RangeAreaChart({
+    history,
+    forecast,
+    param,
+    windowSize = 80,
+    showConfidenceBands = false,
+    confidenceBands = null,
+    violations = null,
+    modelId = null,
+}) {
     const meta = PARAM_META[param] ?? { label: param, unit: '', color: '#60a5fa' };
     const useHistoricalBaseline = useTelemetryStore(s => s.useHistoricalBaseline);
 
@@ -172,7 +192,7 @@ export default function RangeAreaChart({ history, forecast, param, windowSize = 
         const combined = [...historyData, ...forecastData];
         const vols = rollingVolatility(combined.map((row) => row.value));
         return combined.map((row, idx) => ({ ...row, volatility6pt: vols[idx] || 0 }));
-    }, [history, forecast, param, windowSize]);
+    }, [history, forecast, param, windowSize, confidenceBands, showConfidenceBands]);
 
     if (chartData.length === 0) {
         return (

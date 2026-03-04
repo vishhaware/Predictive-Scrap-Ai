@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Plot from 'react-plotly.js';
 import { useTelemetryStore } from '../store/useTelemetryStore';
+import ModelPerformanceDashboard from '../components/ModelPerformanceDashboard';
 
 const HORIZON_OPTIONS = ['1 Hour', '12 Hours', 'Custom'];
 const DEFAULT_HISTORY_WINDOW_HOURS = 72;
@@ -241,6 +242,18 @@ export default function Dashboard() {
               {summary.hasFuture ? `Peak: ${formatPercent(summary.futurePeakRate)} at ${formatDateTime(summary.futurePeakTs)}` : ''}
             </div>
           </div>
+        </div>
+      )}
+
+      {!chartLoading && machineId && (
+        <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #e2e8f0' }}>
+          <h3 style={{ margin: '0 0 16px 0', fontSize: 16, fontWeight: 600 }}>Model Performance</h3>
+          <div style={{ background: '#f8fafc', borderLeft: '4px solid #3b82f6', padding: 12, marginBottom: 12, borderRadius: 4 }}>
+            <div style={{ fontSize: 12, color: '#475569' }}>
+              💡 Model accuracy metrics including precision, recall, F1 score, and confusion matrix for prediction validation
+            </div>
+          </div>
+          <ModelPerformanceDashboard modelId="lightgbm_v1" machineId={machineId} />
         </div>
       )}
 
