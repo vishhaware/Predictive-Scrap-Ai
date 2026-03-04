@@ -92,6 +92,10 @@ try:
     from dynamic_limits import calculate_dynamic_limits
 except ImportError:
     from .dynamic_limits import calculate_dynamic_limits
+try:
+    from performance_metrics import PerformanceCalculator
+except ImportError:
+    from .performance_metrics import PerformanceCalculator
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -5235,4 +5239,321 @@ def get_data_quality_violations(
             for v in violations
         ]
     }
+
+
+# ==================== MODEL PERFORMANCE METRICS ENDPOINTS ====================
+
+@app.get("/api/ai/model-metrics/{model_id}")
+@database.with_reconnect(max_retries=3)
+def get_model_metrics(
+    model_id: str,
+    machine_id: Optional[str] = None,
+    hours: int = 24,
+    db: Session = Depends(get_db)
+):
+    """Get latest performance metrics for a specific model."""
+    query = db.query(models.ModelPerformanceMetrics).filter(
+        models.ModelPerformanceMetrics.model_id == model_id
+    )
+
+    if machine_id:
+        query = query.filter(models.ModelPerformanceMetrics.machine_id == machine_id)
+    else:
+        query = query.filter(models.ModelPerformanceMetrics.machine_id.is_(None))
+
+    # Get most recent metrics
+    latest = query.order_by(models.ModelPerformanceMetrics.evaluated_at.desc()).first()
+
+    if not latest:
+        return {
+            "model_id": model_id,
+            "machine_id": machine_id,
+            "message": "No metrics available yet",
+            "metrics": None
+        }
+
+    return {
+        "model_id": latest.model_id,
+        "machine_id": latest.machine_id,
+        "evaluated_at": latest.evaluated_at.isoformat() if latest.evaluated_at else None,
+        "metrics": {
+            "accuracy": latest.accuracy,
+            "precision": latest.precision,
+            "recall": latest.recall,
+            "f1_score": latest.f1_score,
+            "roc_auc": latest.roc_auc,
+            "brier_score": latest.brier_score,
+            "true_positives": latest.true_positives,
+            "false_positives": latest.false_positives,
+            "true_negatives": latest.true_negatives,
+            "false_negatives": latest.false_negatives,
+            "avg_confidence": latest.avg_confidence,
+            "confidence_std": latest.confidence_std,
+            "prediction_uncertainty_mean": latest.prediction_uncertainty_mean,
+            "prediction_uncertainty_std": latest.prediction_uncertainty_std,
+            "samples_count": latest.samples_count,
+        }
+    }
+
+
+@app.get("/api/ai/metrics-history/{model_id}")
+@database.with_reconnect(max_retries=3)
+def get_metrics_history(
+    model_id: str,
+    machine_id: Optional[str] = None,
+    hours: int = 168,  # 7 days default
+    db: Session = Depends(get_db)
+):
+    """Get historical performance metrics for a model over time."""
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    query = db.query(models.ModelPerformanceMetrics).filter(
+        models.ModelPerformanceMetrics.model_id == model_id,
+        models.ModelPerformanceMetrics.evaluated_at >= cutoff_time
+    )
+
+    if machine_id:
+        query = query.filter(models.ModelPerformanceMetrics.machine_id == machine_id)
+    else:
+        query = query.filter(models.ModelPerformanceMetrics.machine_id.is_(None))
+
+    history = query.order_by(models.ModelPerformanceMetrics.evaluated_at.asc()).all()
+
+    return {
+        "model_id": model_id,
+        "machine_id": machine_id,
+        "history_hours": hours,
+        "count": len(history),
+        "data": [
+            {
+                "timestamp": m.evaluated_at.isoformat() if m.evaluated_at else None,
+                "accuracy": m.accuracy,
+                "precision": m.precision,
+                "recall": m.recall,
+                "f1_score": m.f1_score,
+                "roc_auc": m.roc_auc,
+                "samples_count": m.samples_count,
+            }
+            for m in history
+        ]
+    }
+
+
+@app.get("/api/ai/model-comparison")
+@database.with_reconnect(max_retries=3)
+def compare_models(
+    model_ids: str,  # CSV: "model1,model2,model3"
+    machine_id: Optional[str] = None,
+    db: Session = Depends(get_db)
+):
+    """Compare multiple models side-by-side on latest metrics."""
+    model_list = [m.strip() for m in model_ids.split(',')]
+    results = {}
+
+    for model_id in model_list:
+        query = db.query(models.ModelPerformanceMetrics).filter(
+            models.ModelPerformanceMetrics.model_id == model_id
+        )
+
+        if machine_id:
+            query = query.filter(models.ModelPerformanceMetrics.machine_id == machine_id)
+        else:
+            query = query.filter(models.ModelPerformanceMetrics.machine_id.is_(None))
+
+        latest = query.order_by(models.ModelPerformanceMetrics.evaluated_at.desc()).first()
+
+        results[model_id] = {
+            "accuracy": latest.accuracy if latest else None,
+            "precision": latest.precision if latest else None,
+            "recall": latest.recall if latest else None,
+            "f1_score": latest.f1_score if latest else None,
+            "roc_auc": latest.roc_auc if latest else None,
+            "samples_count": latest.samples_count if latest else None,
+            "evaluated_at": latest.evaluated_at.isoformat() if latest and latest.evaluated_at else None,
+        }
+
+    return {
+        "machine_id": machine_id,
+        "models": results,
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+
+@app.get("/api/ai/metrics-dashboard")
+@database.with_reconnect(max_retries=3)
+def get_metrics_dashboard(
+    hours: int = 24,
+    db: Session = Depends(get_db)
+):
+    """Get fleet-wide aggregated performance metrics."""
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    # Get all models' global metrics
+    global_metrics = db.query(models.ModelPerformanceMetrics).filter(
+        models.ModelPerformanceMetrics.machine_id.is_(None),
+        models.ModelPerformanceMetrics.evaluated_at >= cutoff_time
+    ).all()
+
+    # Get per-machine metrics
+    per_machine = db.query(models.ModelPerformanceMetrics).filter(
+        models.ModelPerformanceMetrics.machine_id.isnot(None),
+        models.ModelPerformanceMetrics.evaluated_at >= cutoff_time
+    ).all()
+
+    # Aggregate global metrics
+    fleet_metrics = {
+        "avg_accuracy": None,
+        "avg_precision": None,
+        "avg_recall": None,
+        "avg_f1": None,
+        "avg_roc_auc": None,
+        "total_samples": 0,
+    }
+
+    if global_metrics:
+        accuracies = [m.accuracy for m in global_metrics if m.accuracy is not None]
+        precisions = [m.precision for m in global_metrics if m.precision is not None]
+        recalls = [m.recall for m in global_metrics if m.recall is not None]
+        f1_scores = [m.f1_score for m in global_metrics if m.f1_score is not None]
+        roc_aucs = [m.roc_auc for m in global_metrics if m.roc_auc is not None]
+
+        if accuracies:
+            fleet_metrics["avg_accuracy"] = float(sum(accuracies) / len(accuracies))
+        if precisions:
+            fleet_metrics["avg_precision"] = float(sum(precisions) / len(precisions))
+        if recalls:
+            fleet_metrics["avg_recall"] = float(sum(recalls) / len(recalls))
+        if f1_scores:
+            fleet_metrics["avg_f1"] = float(sum(f1_scores) / len(f1_scores))
+        if roc_aucs:
+            fleet_metrics["avg_roc_auc"] = float(sum(roc_aucs) / len(roc_aucs))
+
+        fleet_metrics["total_samples"] = sum(m.samples_count for m in global_metrics if m.samples_count)
+
+    # Group per-machine metrics
+    machine_metrics = {}
+    for metric in per_machine:
+        key = metric.machine_id or "unknown"
+        if key not in machine_metrics:
+            machine_metrics[key] = {
+                "accuracy": metric.accuracy,
+                "f1_score": metric.f1_score,
+                "roc_auc": metric.roc_auc,
+                "samples": metric.samples_count,
+                "model_id": metric.model_id,
+                "evaluated_at": metric.evaluated_at.isoformat() if metric.evaluated_at else None,
+            }
+        else:
+            # Update with more recent if applicable
+            if metric.evaluated_at and (not machine_metrics[key].get("evaluated_at") or
+                metric.evaluated_at > datetime.fromisoformat(machine_metrics[key]["evaluated_at"].replace("Z", "+00:00"))):
+                machine_metrics[key] = {
+                    "accuracy": metric.accuracy,
+                    "f1_score": metric.f1_score,
+                    "roc_auc": metric.roc_auc,
+                    "samples": metric.samples_count,
+                    "model_id": metric.model_id,
+                    "evaluated_at": metric.evaluated_at.isoformat() if metric.evaluated_at else None,
+                }
+
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "window_hours": hours,
+        "fleet_metrics": fleet_metrics,
+        "per_machine": machine_metrics,
+    }
+
+
+@app.post("/api/ai/compute-metrics")
+@database.with_reconnect(max_retries=3)
+def trigger_metrics_computation(
+    machine_id: Optional[str] = None,
+    window_hours: int = 24,
+    db: Session = Depends(get_db)
+):
+    """
+    Trigger computation of model performance metrics.
+    Computes metrics from recent cycles for specified machine(s).
+    """
+    try:
+        if machine_id:
+            # Compute for specific machine
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+            cycles = db.query(models.Cycle).filter(
+                models.Cycle.machine_id == machine_id,
+                models.Cycle.timestamp >= cutoff_time
+            ).order_by(models.Cycle.timestamp.desc()).limit(1440).all()
+
+            if not cycles:
+                return {
+                    "status": "no_data",
+                    "message": f"No cycles found for {machine_id} in last {window_hours} hours"
+                }
+
+            # Compute metrics
+            metrics = PerformanceCalculator.compute_from_cycles(cycles, "lightgbm_v1")
+            metrics_dict = metrics.to_dict()
+            metrics_dict['model_id'] = "lightgbm_v1"
+            metrics_dict['machine_id'] = machine_id
+            metrics_dict['window_duration_hours'] = window_hours
+            metrics_dict['evaluated_at'] = datetime.now(timezone.utc)
+
+            # Store in database
+            db_metrics = models.ModelPerformanceMetrics(**metrics_dict)
+            db.add(db_metrics)
+            db.commit()
+
+            return {
+                "status": "success",
+                "machine_id": machine_id,
+                "metrics_computed": True,
+                "samples": metrics.samples_count,
+                "f1_score": metrics.f1,
+            }
+        else:
+            # Compute for all machines
+            all_machines = db.query(models.MachineStats).all()
+            results = []
+
+            for machine_stat in all_machines:
+                machine_id_local = machine_stat.machine_id
+                cutoff_time = datetime.now(timezone.utc) - timedelta(hours=window_hours)
+                cycles = db.query(models.Cycle).filter(
+                    models.Cycle.machine_id == machine_id_local,
+                    models.Cycle.timestamp >= cutoff_time
+                ).order_by(models.Cycle.timestamp.desc()).limit(1440).all()
+
+                if not cycles:
+                    continue
+
+                metrics = PerformanceCalculator.compute_from_cycles(cycles, "lightgbm_v1")
+                metrics_dict = metrics.to_dict()
+                metrics_dict['model_id'] = "lightgbm_v1"
+                metrics_dict['machine_id'] = machine_id_local
+                metrics_dict['window_duration_hours'] = window_hours
+                metrics_dict['evaluated_at'] = datetime.now(timezone.utc)
+
+                db_metrics = models.ModelPerformanceMetrics(**metrics_dict)
+                db.add(db_metrics)
+
+                results.append({
+                    "machine_id": machine_id_local,
+                    "samples": metrics.samples_count,
+                    "f1_score": metrics.f1,
+                })
+
+            db.commit()
+
+            return {
+                "status": "success",
+                "machines_processed": len(results),
+                "results": results,
+            }
+
+    except Exception as e:
+        logger.error(f"Failed to compute metrics: {e}")
+        return {
+            "status": "error",
+            "message": str(e)
+        }
 

@@ -657,4 +657,81 @@ export const useTelemetryStore = create((set, get) => ({
             console.error('Failed to load data quality violations:', error);
         }
     },
+
+    // ── Model Metrics Actions ───────────────────────────────────────────────────────
+    modelMetrics: {},
+    metricsHistory: [],
+    metricsLoading: false,
+    modelComparison: {},
+
+    async loadModelMetrics(modelId, machineId, hours = 24) {
+        set({ metricsLoading: true });
+        try {
+            const params = new URLSearchParams();
+            params.append('hours', hours);
+            if (machineId) params.append('machine_id', machineId);
+
+            const data = await fetchJson(`${API_BASE}/ai/model-metrics/${modelId}?${params}`);
+            set({ modelMetrics: data.metrics || {}, metricsLoading: false });
+        } catch (error) {
+            console.error('Failed to load model metrics:', error);
+            set({ metricsLoading: false });
+        }
+    },
+
+    async loadMetricsHistory(modelId, machineId, hours = 168) {
+        try {
+            const params = new URLSearchParams();
+            params.append('hours', hours);
+            if (machineId) params.append('machine_id', machineId);
+
+            const data = await fetchJson(`${API_BASE}/ai/metrics-history/${modelId}?${params}`);
+            set({ metricsHistory: data.data || [] });
+        } catch (error) {
+            console.error('Failed to load metrics history:', error);
+        }
+    },
+
+    async compareModels(modelIds, machineId) {
+        try {
+            const params = new URLSearchParams();
+            params.append('model_ids', modelIds);
+            if (machineId) params.append('machine_id', machineId);
+
+            const data = await fetchJson(`${API_BASE}/ai/model-comparison?${params}`);
+            set({ modelComparison: data.models || {} });
+        } catch (error) {
+            console.error('Failed to compare models:', error);
+        }
+    },
+
+    async loadMetricsDashboard(hours = 24) {
+        try {
+            const params = new URLSearchParams();
+            params.append('hours', hours);
+
+            const data = await fetchJson(`${API_BASE}/ai/metrics-dashboard?${params}`);
+            return data;
+        } catch (error) {
+            console.error('Failed to load metrics dashboard:', error);
+            return null;
+        }
+    },
+
+    async triggerMetricsComputation(machineId, windowHours = 24) {
+        try {
+            const params = new URLSearchParams();
+            if (machineId) params.append('machine_id', machineId);
+            params.append('window_hours', windowHours);
+
+            const response = await fetch(`${API_BASE}/ai/compute-metrics?${params}`, {
+                method: 'POST',
+            });
+            if (!response.ok) throw new Error('Failed to compute metrics');
+            return await response.json();
+        } catch (error) {
+            console.error('Failed to trigger metrics computation:', error);
+            throw error;
+        }
+    },
 }));
