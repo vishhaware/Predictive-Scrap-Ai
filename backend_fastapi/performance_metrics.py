@@ -160,8 +160,13 @@ class PerformanceCalculator:
             # Collect actual outcome (if available)
             # Assuming scrap_counter in data indicates actual outcome
             data = cycle.data or {}
-            scrap_counter = data.get('scrap_counter', 0)
-            actual_outcomes.append(1 if scrap_counter > 0 else 0)
+            scrap = data.get('scrap_counter', 0)
+            
+            # Extract 'value' if wrapped in a dictionary (common in this app's telemetry)
+            if isinstance(scrap, dict):
+                scrap = scrap.get('value', 0)
+            
+            actual_outcomes.append(1 if (scrap or 0) > 0 else 0)
 
             # Collect confidence if available
             if cycle.prediction.confidence:

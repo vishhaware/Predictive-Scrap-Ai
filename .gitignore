@@ -24,6 +24,11 @@ backend_fastapi/factory_brain_fastapi.db-shm
 backend_fastapi/factory_brain_fastapi.db-wal
 *.db.bak
 *.tmp
+cleaned_data_output/
+reports/*.pdf
+reports/*.txt
+reports/*.json
+results*.csv
 
 # Large local machine data (keep local; don't version raw dumps)
 frontend/Data/*.csv

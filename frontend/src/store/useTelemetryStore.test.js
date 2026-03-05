@@ -175,6 +175,7 @@ test('bootstrap loads once and deduplicates repeated calls', async () => {
 
 test('loadChartData stores machine past/future payload', async () => {
     const originalFetch = globalThis.fetch;
+    useTelemetryStore.setState({ chartDataCache: {}, chartData: null, chartDataLoading: false });
     globalThis.fetch = async (url) => {
         if (!String(url).includes('/api/machines/M231-11/chart-data')) {
             throw new Error(`Unexpected fetch URL: ${url}`);
@@ -199,6 +200,78 @@ test('loadChartData stores machine past/future payload', async () => {
         assert.equal(state.chartData.meta.seam_ok, true);
         assert.equal(state.chartData.past.length, 1);
         assert.equal(state.chartData.future.length, 1);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('loadChartData falls back to legacy endpoint when chart-data-v2 fails', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    useTelemetryStore.setState({ chartDataCache: {}, chartData: null, chartDataLoading: false });
+    globalThis.fetch = async (url) => {
+        const s = String(url);
+        calls.push(s);
+
+        if (s.includes('/api/machines/M231-11/chart-data-v2')) {
+            throw new Error('v2 unavailable');
+        }
+
+        if (s.includes('/api/machines/M231-11/chart-data')) {
+            return {
+                ok: true,
+                async json() {
+                    return {
+                        machine_id: 'M231-11',
+                        past: [{ timestamp: '2026-01-01T00:00:00.000Z', scrap_prob: 0.1, scrap_pct: 10, volatility_6pt: 0, segment: 'Past', source: 'observed' }],
+                        future: [{ timestamp: '2026-01-01T00:01:00.000Z', scrap_prob: 0.2, scrap_pct: 20, volatility_6pt: 1, segment: 'Future', source: 'forecasted' }],
+                        meta: { seam_ok: true, source: 'legacy' },
+                    };
+                },
+            };
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url}`);
+    };
+
+    try {
+        await useTelemetryStore.getState().loadChartData('M231-11', '8-1419168-4', 60);
+        const state = useTelemetryStore.getState();
+        assert.equal(Boolean(state.chartData), true);
+        assert.equal(state.chartData.meta.seam_ok, true);
+        assert.equal(calls.some((c) => c.includes('/chart-data-v2')), true);
+        assert.equal(calls.some((c) => c.includes('/chart-data?') && c.includes('source=fallback_v2')), true);
+    } finally {
+        globalThis.fetch = originalFetch;
+    }
+});
+
+test('loadChartData uses local cache when entry is fresh', async () => {
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    useTelemetryStore.setState({ chartDataCache: {}, chartData: null, chartDataLoading: false });
+    globalThis.fetch = async (url) => {
+        calls.push(String(url));
+        if (!String(url).includes('/api/machines/M231-11/chart-data')) {
+            throw new Error(`Unexpected fetch URL: ${url}`);
+        }
+        return {
+            ok: true,
+            async json() {
+                return {
+                    machine_id: 'M231-11',
+                    past: [{ timestamp: '2026-01-01T00:00:00.000Z', scrap_prob: 0.1, scrap_pct: 10, volatility_6pt: 0, segment: 'Past', source: 'observed' }],
+                    future: [{ timestamp: '2026-01-01T00:01:00.000Z', scrap_prob: 0.2, scrap_pct: 20, volatility_6pt: 1, segment: 'Future', source: 'forecasted' }],
+                    meta: { seam_ok: true, source: 'cleaned_data_v2' },
+                };
+            },
+        };
+    };
+
+    try {
+        await useTelemetryStore.getState().loadChartData('M231-11', '8-1419168-4', 60);
+        await useTelemetryStore.getState().loadChartData('M231-11', '8-1419168-4', 60);
+        assert.equal(calls.length, 1);
     } finally {
         globalThis.fetch = originalFetch;
     }

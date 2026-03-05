@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import gzip
 import json
 import logging
 import os
@@ -9,16 +10,22 @@ from functools import lru_cache
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 from statistics import median
+from threading import Lock
 import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import pandas as pd
+try:
+    from sklearn.metrics import roc_auc_score
+except Exception:
+    roc_auc_score = None  # type: ignore
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
@@ -96,6 +103,32 @@ try:
     from performance_metrics import PerformanceCalculator
 except ImportError:
     from .performance_metrics import PerformanceCalculator
+try:
+    from cache_manager import cache_health, get_chart_data_cache, invalidate_machine_cache, set_chart_data_cache
+except ImportError:
+    from .cache_manager import cache_health, get_chart_data_cache, invalidate_machine_cache, set_chart_data_cache
+try:
+    from metrics import (
+        get_metrics_payload,
+        health_payload as metrics_health_payload,
+        metrics_enabled,
+        observe_chart_data_request,
+        observe_lstm_inference,
+        set_data_freshness,
+    )
+except ImportError:
+    from .metrics import (
+        get_metrics_payload,
+        health_payload as metrics_health_payload,
+        metrics_enabled,
+        observe_chart_data_request,
+        observe_lstm_inference,
+        set_data_freshness,
+    )
+try:
+    from data_quality import run_quality_check_for_all
+except ImportError:
+    from .data_quality import run_quality_check_for_all
 
 # --- Logging Configuration ---
 logging.basicConfig(
@@ -425,9 +458,20 @@ app = FastAPI(title="Smart Factory Brain - FastAPI", lifespan=lifespan)
 app.add_middleware(GZipMiddleware, minimum_size=1000)
 
 @app.middleware("http")
-async def add_process_time_and_request_id(request, call_next):
+async def add_process_time_and_request_id(request: Request, call_next):
     request_id = str(uuid.uuid4())
     start_time = time.time()
+    if RATE_LIMIT_ENABLED and request.url.path.startswith("/api/"):
+        client_host = request.client.host if request.client else "unknown"
+        if not _rate_limit_allowed(client_host):
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "ok": False,
+                    "error": "Rate limit exceeded",
+                    "detail": f"Max {RATE_LIMIT_REQUESTS_PER_MIN} requests per minute per client.",
+                },
+            )
     response = await call_next(request)
     process_time = time.time() - start_time
     response.headers["X-Process-Time"] = str(process_time)
@@ -519,6 +563,35 @@ MES_WORKBOOK_PATH = os.getenv(
 )
 MACHINE_FILE_EXTENSIONS = [".csv", ".xlsx", ".xls", ""]
 MODELS_DIR = os.path.join(BASE_DIR, "models")
+CLEANED_DATA_OUTPUT_DIR = os.getenv(
+    "CLEANED_DATA_OUTPUT_DIR",
+    os.path.join(BASE_DIR, "..", "cleaned_data_output"),
+)
+LSTM_CHUNKS_COMPRESSED_DIR = os.getenv(
+    "LSTM_CHUNKS_COMPRESSED_DIR",
+    os.path.join(CLEANED_DATA_OUTPUT_DIR, "lstm_chunks_compressed"),
+)
+DATA_QUALITY_REPORT_PATH = os.getenv(
+    "DATA_QUALITY_REPORT_PATH",
+    os.path.join(CLEANED_DATA_OUTPUT_DIR, "data_quality_report.json"),
+)
+DEFAULT_SEQUENCE_SENSOR_COLUMNS = [
+    "Cushion",
+    "Injection_time",
+    "Dosage_time",
+    "Injection_pressure",
+    "Switch_pressure",
+    "Switch_position",
+    "Cycle_time",
+    "Cyl_tmp_z1",
+    "Cyl_tmp_z2",
+    "Cyl_tmp_z3",
+    "Cyl_tmp_z4",
+    "Cyl_tmp_z5",
+    "Cyl_tmp_z8",
+    "Shot_size",
+    "Ejector_fix_deviation_torque",
+]
 MAX_API_LIMIT = _env_int("MAX_API_LIMIT", 1000)
 MAX_CYCLES_PER_MACHINE = _env_int("MAX_CYCLES_PER_MACHINE", 5000)
 INITIAL_LOAD_CYCLES = _env_int("INITIAL_LOAD_CYCLES", 500)
@@ -536,6 +609,9 @@ PRUNE_BATCH_SIZE = max(1, min(_env_int("PRUNE_BATCH_SIZE", 500), 900))
 CSV_RESUME_CHUNK_ROWS = max(1000, min(_env_int("CSV_RESUME_CHUNK_ROWS", 20000), 100000))
 FLEET_CHART_CACHE_TTL_SEC = max(5.0, _env_float("FLEET_CHART_CACHE_TTL_SEC", 30.0))
 MACHINE_CHART_CACHE_TTL_SEC = max(5.0, _env_float("MACHINE_CHART_CACHE_TTL_SEC", 30.0))
+CHART_DATA_V2_CACHE_TTL_SEC = max(5.0, _env_float("CHART_DATA_V2_CACHE_TTL_SEC", 300.0))
+RATE_LIMIT_ENABLED = _env_bool("RATE_LIMIT_ENABLED", True)
+RATE_LIMIT_REQUESTS_PER_MIN = max(30, _env_int("RATE_LIMIT_REQUESTS_PER_MIN", 600))
 
 # Runtime state
 machine_contexts: Dict[str, Dict[str, Any]] = {}
@@ -557,6 +633,24 @@ part_catalog_cache: Dict[str, Any] = {"mtime": None, "data": {}}
 part_timeline_cache: Dict[str, Any] = {"mtime": None, "data": {}}
 fleet_chart_cache: Dict[str, Any] = {"key": None, "expires_at": 0.0, "payload": None}
 machine_chart_cache: Dict[str, Dict[str, Any]] = {}
+cleaned_machine_cache: Dict[str, Dict[str, Any]] = {}
+CHART_ROLLOUT_LATENCY_WINDOW = max(50, _env_int("CHART_ROLLOUT_LATENCY_WINDOW", 500))
+chart_rollout_metrics: Dict[str, Any] = {
+    "v2_requests": 0,
+    "v2_success": 0,
+    "v2_http_4xx": 0,
+    "v2_http_5xx": 0,
+    "v2_empty_past": 0,
+    "v2_empty_future": 0,
+    "v2_seam_false": 0,
+    "v2_part_filter_message_nonempty": 0,
+    "v2_latency_ms_recent": [],
+    "legacy_fallback_hits": 0,
+    "last_updated": None,
+}
+chart_rollout_lock = Lock()
+rate_limit_lock = Lock()
+rate_limit_state: Dict[str, List[float]] = {}
 PREDICTIVE_CSV_FILENAME = "MES_Manufacturing_M-231_M-356_M-471_M-607_M-612.xlsx - Data.csv"
 PREDICTIVE_CSV_CANDIDATES = [
     os.getenv("PREDICTIVE_SOURCE_CSV"),
@@ -568,6 +662,71 @@ PREDICTIVE_CSV_CANDIDATES = [
 
 def _clamp(value: float, min_value: float, max_value: float) -> float:
     return max(min_value, min(max_value, value))
+
+
+def _rate_limit_allowed(client_id: str, max_requests_per_minute: int = RATE_LIMIT_REQUESTS_PER_MIN) -> bool:
+    now_epoch = time.time()
+    window_start = now_epoch - 60.0
+    with rate_limit_lock:
+        entries = rate_limit_state.get(client_id, [])
+        entries = [ts for ts in entries if ts >= window_start]
+        if len(entries) >= int(max_requests_per_minute):
+            rate_limit_state[client_id] = entries
+            return False
+        entries.append(now_epoch)
+        rate_limit_state[client_id] = entries
+        # Bounded map to avoid unbounded memory growth.
+        if len(rate_limit_state) > 5000:
+            # prune oldest idle clients
+            stale_clients = [key for key, values in rate_limit_state.items() if not values or values[-1] < window_start]
+            for key in stale_clients[:1000]:
+                rate_limit_state.pop(key, None)
+        return True
+
+
+def _record_chart_data_v2_observation(
+    status_code: int,
+    latency_ms: float,
+    past_len: int = 0,
+    future_len: int = 0,
+    seam_ok: Optional[bool] = None,
+    part_filter_message: Optional[str] = None,
+) -> None:
+    with chart_rollout_lock:
+        chart_rollout_metrics["v2_requests"] = int(chart_rollout_metrics.get("v2_requests", 0)) + 1
+        if 200 <= int(status_code) < 300:
+            chart_rollout_metrics["v2_success"] = int(chart_rollout_metrics.get("v2_success", 0)) + 1
+        elif 400 <= int(status_code) < 500:
+            chart_rollout_metrics["v2_http_4xx"] = int(chart_rollout_metrics.get("v2_http_4xx", 0)) + 1
+        elif int(status_code) >= 500:
+            chart_rollout_metrics["v2_http_5xx"] = int(chart_rollout_metrics.get("v2_http_5xx", 0)) + 1
+
+        if int(past_len) == 0:
+            chart_rollout_metrics["v2_empty_past"] = int(chart_rollout_metrics.get("v2_empty_past", 0)) + 1
+        if int(future_len) == 0:
+            chart_rollout_metrics["v2_empty_future"] = int(chart_rollout_metrics.get("v2_empty_future", 0)) + 1
+        if seam_ok is False:
+            chart_rollout_metrics["v2_seam_false"] = int(chart_rollout_metrics.get("v2_seam_false", 0)) + 1
+        if str(part_filter_message or "").strip():
+            chart_rollout_metrics["v2_part_filter_message_nonempty"] = int(
+                chart_rollout_metrics.get("v2_part_filter_message_nonempty", 0)
+            ) + 1
+
+        latencies = chart_rollout_metrics.get("v2_latency_ms_recent")
+        if not isinstance(latencies, list):
+            latencies = []
+            chart_rollout_metrics["v2_latency_ms_recent"] = latencies
+        latencies.append(round(float(max(0.0, latency_ms)), 3))
+        if len(latencies) > CHART_ROLLOUT_LATENCY_WINDOW:
+            del latencies[: len(latencies) - CHART_ROLLOUT_LATENCY_WINDOW]
+
+        chart_rollout_metrics["last_updated"] = _now_iso()
+
+
+def _record_legacy_fallback_hit() -> None:
+    with chart_rollout_lock:
+        chart_rollout_metrics["legacy_fallback_hits"] = int(chart_rollout_metrics.get("legacy_fallback_hits", 0)) + 1
+        chart_rollout_metrics["last_updated"] = _now_iso()
 
 
 def _resolve_predictive_csv_path() -> Optional[str]:
@@ -3539,6 +3698,33 @@ async def admin_models_auto_train_run_now():
     return {"ok": True, "queued_job": queued, "auto_train": auto_train_state}
 
 
+@app.post("/api/ai/retrain-now")
+async def ai_retrain_now():
+    """
+    Public retrain trigger alias for operations/automation tooling.
+    Uses existing auto-train config and queueing safeguards.
+    """
+    active_job = _active_training_job_id()
+    if active_job:
+        raise HTTPException(status_code=409, detail=f"Training job already active: {active_job}")
+    queued = _enqueue_training_job(
+        machine_ids=auto_train_state.get("machine_ids"),
+        segment_id=auto_train_state.get("segment_id"),
+        auto_promote=bool(auto_train_state.get("auto_promote")),
+        source="api_retrain_now",
+    )
+    auto_train_state["last_run_at"] = _now_iso()
+    auto_train_state["last_run_epoch"] = time.time()
+    auto_train_state["last_job_id"] = queued.get("job_id")
+    auto_train_state["last_error"] = None
+    auto_train_state["last_result"] = {"status": "queued", "job_id": queued.get("job_id")}
+    return {
+        "ok": True,
+        "queued_job": queued,
+        "auto_train": auto_train_state,
+    }
+
+
 @app.get("/api/admin/models/benchmark")
 async def admin_models_benchmark():
     data = load_latest_benchmark()
@@ -3900,6 +4086,222 @@ async def _build_machine_chart_data_payload(
     return payload
 
 
+def _cleaned_machine_csv_path(machine_id: str) -> Path:
+    return Path(CLEANED_DATA_OUTPUT_DIR) / f"{machine_id}_cleaned.csv"
+
+
+def _cleaned_machine_csv_mtime(machine_id: str) -> float:
+    path = _cleaned_machine_csv_path(machine_id)
+    try:
+        return float(path.stat().st_mtime)
+    except Exception:
+        return 0.0
+
+
+def _chart_data_v2_cache_key(
+    machine_id: str,
+    part_number: Optional[str],
+    horizon_minutes: int,
+    history_limit: int,
+    shift_hours: int,
+    shift: Optional[str],
+) -> str:
+    mtime = _cleaned_machine_csv_mtime(machine_id)
+    part_token = part_number or "_"
+    shift_token = shift or "_"
+    return (
+        f"chart_data_v2:{machine_id}:{part_token}:{int(horizon_minutes)}:{int(history_limit)}:"
+        f"{int(shift_hours)}:{shift_token}:{int(mtime)}"
+    )
+
+
+def _clone_json_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        return json.loads(json.dumps(payload, default=str))
+    except Exception:
+        return dict(payload)
+
+
+def _mark_chart_payload_cache_meta(payload: Dict[str, Any], cache_hit: bool) -> Dict[str, Any]:
+    result = _clone_json_payload(payload)
+    meta = result.get("meta")
+    if not isinstance(meta, dict):
+        meta = {}
+    meta["cache_hit"] = bool(cache_hit)
+    meta["cache_backend"] = cache_health().get("backend")
+    result["meta"] = meta
+    return result
+
+
+def _classify_shift_from_timestamp(ts: pd.Timestamp) -> str:
+    hour = int(ts.hour)
+    if 6 <= hour < 14:
+        return "MORNING"
+    if 14 <= hour < 22:
+        return "AFTERNOON"
+    return "NIGHT"
+
+
+def _load_cleaned_machine_frame(machine_id: str, force_reload: bool = False) -> pd.DataFrame:
+    path = _cleaned_machine_csv_path(machine_id)
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = None
+
+    cache_entry = cleaned_machine_cache.get(machine_id)
+    if (
+        not force_reload
+        and cache_entry
+        and cache_entry.get("mtime") == mtime
+        and isinstance(cache_entry.get("df"), pd.DataFrame)
+    ):
+        return cache_entry["df"].copy()
+
+    df = pd.read_csv(path, low_memory=False)
+    if "timestamp" not in df.columns:
+        raise ValueError(f"Missing required 'timestamp' column in cleaned file: {path}")
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce", utc=True)
+    df = df.dropna(subset=["timestamp"]).sort_values("timestamp").reset_index(drop=True)
+    if df.empty:
+        cleaned_machine_cache[machine_id] = {"mtime": mtime, "df": df}
+        return df
+
+    if "machine_id" not in df.columns:
+        df["machine_id"] = machine_id
+    else:
+        df["machine_id"] = df["machine_id"].astype(str).str.strip().replace("", machine_id).fillna(machine_id)
+
+    if "part_number" in df.columns:
+        df["part_number"] = (
+            df["part_number"]
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .replace({"": "UNKNOWN", "NAN": "UNKNOWN", "NONE": "UNKNOWN"})
+            .fillna("UNKNOWN")
+        )
+    else:
+        df["part_number"] = "UNKNOWN"
+
+    if "shift" in df.columns:
+        df["shift"] = df["shift"].astype(str).str.upper().str.strip()
+        df.loc[df["shift"] == "", "shift"] = df.loc[df["shift"] == "", "timestamp"].apply(_classify_shift_from_timestamp)
+    else:
+        df["shift"] = df["timestamp"].apply(_classify_shift_from_timestamp)
+
+    numeric_candidates = set(DEFAULT_SEQUENCE_SENSOR_COLUMNS) | {
+        "scrap_inc",
+        "shot_inc",
+        "scrap_rate",
+        "has_scrap",
+        "Scrap_counter",
+        "Shot_counter",
+    }
+    for col in numeric_candidates:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    if "scrap_inc" not in df.columns and "Scrap_counter" in df.columns:
+        delta = df["Scrap_counter"].diff()
+        delta = delta.where(delta >= 0, df["Scrap_counter"])
+        df["scrap_inc"] = delta.fillna(df["Scrap_counter"]).clip(lower=0.0)
+    if "shot_inc" not in df.columns and "Shot_counter" in df.columns:
+        delta = df["Shot_counter"].diff()
+        delta = delta.where(delta >= 0, df["Shot_counter"])
+        df["shot_inc"] = delta.fillna(df["Shot_counter"]).clip(lower=0.0)
+
+    if "scrap_rate" not in df.columns:
+        if "scrap_inc" in df.columns and "shot_inc" in df.columns:
+            df["scrap_rate"] = np.where(
+                df["shot_inc"] > 0,
+                (df["scrap_inc"] / df["shot_inc"]) * 100.0,
+                0.0,
+            )
+        else:
+            df["scrap_rate"] = 0.0
+    df["scrap_rate"] = pd.to_numeric(df["scrap_rate"], errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    if "has_scrap" not in df.columns:
+        if "scrap_inc" in df.columns:
+            df["has_scrap"] = (pd.to_numeric(df["scrap_inc"], errors="coerce").fillna(0.0) > 0).astype(int)
+        else:
+            df["has_scrap"] = (df["scrap_rate"] > 0.0).astype(int)
+    else:
+        df["has_scrap"] = pd.to_numeric(df["has_scrap"], errors="coerce").fillna(0).astype(int)
+
+    for sensor in DEFAULT_SEQUENCE_SENSOR_COLUMNS:
+        if sensor not in df.columns:
+            df[sensor] = 0.0
+        df[sensor] = pd.to_numeric(df[sensor], errors="coerce").ffill().bfill().fillna(0.0)
+
+    cleaned_machine_cache[machine_id] = {"mtime": mtime, "df": df}
+    return df.copy()
+
+
+def _compute_cleaned_safe_limits(df: pd.DataFrame, sensor_cols: List[str]) -> Dict[str, Dict[str, float]]:
+    limits: Dict[str, Dict[str, float]] = {}
+    if df.empty:
+        return limits
+    for sensor in sensor_cols:
+        if sensor not in df.columns:
+            continue
+        series = pd.to_numeric(df[sensor], errors="coerce").dropna()
+        if series.empty:
+            continue
+        mean = float(series.mean())
+        std = float(series.std(ddof=0))
+        if std > 0:
+            filtered = series[(series >= (mean - 3.0 * std)) & (series <= (mean + 3.0 * std))]
+            if not filtered.empty:
+                series = filtered
+        limits[sensor] = {
+            "min": float(series.quantile(0.05)),
+            "max": float(series.quantile(0.95)),
+            "mean": float(series.mean()),
+            "std": float(series.std(ddof=0)),
+        }
+    return limits
+
+
+def _cleaned_frame_to_lstm_sequence(
+    df: pd.DataFrame,
+    sensor_cols: List[str],
+    max_steps: int = 60,
+) -> List[Dict[str, float]]:
+    if df.empty:
+        return []
+    ordered = df.sort_values("timestamp").tail(max(10, int(max_steps)))
+    sequence: List[Dict[str, float]] = []
+    for _, row in ordered.iterrows():
+        payload: Dict[str, float] = {}
+        for sensor in sensor_cols:
+            value = _to_float(row.get(sensor))
+            if value is None:
+                continue
+            payload[sensor] = float(value)
+        if payload:
+            sequence.append(payload)
+    return sequence
+
+
+def _infer_step_minutes_from_cleaned(df: pd.DataFrame, default_minutes: float = 5.0) -> float:
+    if len(df) < 2:
+        return float(default_minutes)
+    ts = pd.to_datetime(df["timestamp"], utc=True, errors="coerce").dropna().sort_values()
+    if len(ts) < 2:
+        return float(default_minutes)
+    deltas = ts.diff().dt.total_seconds().div(60.0).dropna()
+    deltas = deltas[(deltas > 0.0) & (deltas <= 240.0)]
+    if deltas.empty:
+        return float(default_minutes)
+    return float(_clamp(float(deltas.median()), 1.0, 60.0))
+
+
 @app.get("/api/machines", response_model=List[MachineSummary])
 async def get_machines(db: Session = Depends(get_db)):
     # Optimized: Pull directly from MachineStats which is updated during ingestion
@@ -3980,8 +4382,11 @@ async def get_machine_chart_data(
     horizon_minutes: int = 60,
     history_limit: int = 500,
     shift_hours: int = 24,
+    source: Optional[str] = None,
     db: Session = Depends(get_db),
 ):
+    if str(source or "").strip().lower().startswith("fallback"):
+        _record_legacy_fallback_hit()
     return await _build_machine_chart_data_payload(
         machine_id=machine_id,
         part_number=part_number,
@@ -3990,6 +4395,560 @@ async def get_machine_chart_data(
         shift_hours=shift_hours,
         db=db,
     )
+
+
+@app.get("/api/machines/{machine_id}/chart-data-v2")
+async def get_machine_chart_data_v2(
+    machine_id: str,
+    part_number: Optional[str] = None,
+    horizon_minutes: int = 60,
+    history_limit: int = 500,
+    shift_hours: int = 24,
+    shift: Optional[str] = None,
+):
+    """
+    Clean-data chart endpoint:
+    - Reads pre-cleaned per-machine CSV (long->wide transformed).
+    - Uses per-cycle scrap_rate/scrap_inc/shot_inc.
+    - Supports machine + part + shift filtering.
+    - Produces a stable chart payload with LSTM probability overlay.
+    """
+    started_perf = time.perf_counter()
+    resolved_machine_id = _require_machine_id(machine_id)
+    resolved_part = _normalize_part_number(part_number) if part_number else None
+    clamped_horizon = max(5, min(int(horizon_minutes), 1920))
+    clamped_history_limit = max(30, min(int(history_limit), MAX_API_LIMIT))
+    clamped_shift_hours = max(1, min(int(shift_hours), 168))
+    resolved_shift = str(shift or "").strip().upper() or None
+    endpoint_label = "chart-data-v2"
+
+    cache_key = _chart_data_v2_cache_key(
+        machine_id=resolved_machine_id,
+        part_number=resolved_part,
+        horizon_minutes=clamped_horizon,
+        history_limit=clamped_history_limit,
+        shift_hours=clamped_shift_hours,
+        shift=resolved_shift,
+    )
+    cached_payload = get_chart_data_cache(cache_key)
+    if isinstance(cached_payload, dict) and cached_payload:
+        payload = _mark_chart_payload_cache_meta(cached_payload, cache_hit=True)
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=200,
+            latency_seconds=latency_seconds,
+            cache_hit=True,
+        )
+        _record_chart_data_v2_observation(
+            status_code=200,
+            latency_ms=latency_seconds * 1000.0,
+            past_len=len(list(payload.get("past") or [])),
+            future_len=len(list(payload.get("future") or [])),
+            seam_ok=bool((payload.get("meta") or {}).get("seam_ok")) if isinstance(payload.get("meta"), dict) else None,
+            part_filter_message=(payload.get("meta") or {}).get("part_filter_message") if isinstance(payload.get("meta"), dict) else None,
+        )
+        return payload
+
+    try:
+        df_full = _load_cleaned_machine_frame(resolved_machine_id)
+    except FileNotFoundError:
+        csv_path = _cleaned_machine_csv_path(resolved_machine_id)
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        _record_chart_data_v2_observation(status_code=404, latency_ms=latency_seconds * 1000.0)
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=404,
+            latency_seconds=latency_seconds,
+            cache_hit=False,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Cleaned dataset not found for {resolved_machine_id}: {csv_path}. "
+                "Run transform_data_pipeline.py first."
+            ),
+        )
+    except ValueError as exc:
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        _record_chart_data_v2_observation(status_code=500, latency_ms=latency_seconds * 1000.0)
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=500,
+            latency_seconds=latency_seconds,
+            cache_hit=False,
+        )
+        raise HTTPException(status_code=500, detail=f"Invalid cleaned dataset for {resolved_machine_id}: {exc}")
+    except Exception as exc:
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        _record_chart_data_v2_observation(status_code=500, latency_ms=latency_seconds * 1000.0)
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=500,
+            latency_seconds=latency_seconds,
+            cache_hit=False,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to load cleaned dataset for {resolved_machine_id}: {exc}")
+
+    if not df_full.empty and "timestamp" in df_full.columns:
+        try:
+            latest_ts = pd.Timestamp(df_full["timestamp"].max()).to_pydatetime()
+            if latest_ts.tzinfo is None:
+                latest_ts = latest_ts.replace(tzinfo=timezone.utc)
+            freshness_minutes = max(0.0, (datetime.now(timezone.utc) - latest_ts).total_seconds() / 60.0)
+            set_data_freshness(machine_id=resolved_machine_id, freshness_minutes=freshness_minutes)
+        except Exception:
+            pass
+
+    if df_full.empty:
+        payload = {
+            "machine_id": resolved_machine_id,
+            "part_number": resolved_part,
+            "shift": resolved_shift,
+            "past": [],
+            "future": [],
+            "safe_limits": {},
+            "meta": {
+                "source": "cleaned_data_v2",
+                "seam_ok": False,
+                "generated_at": _now_iso(),
+                "machine_id": resolved_machine_id,
+                "part_number": resolved_part,
+                "shift": resolved_shift,
+                "horizon_used_minutes": clamped_horizon,
+                "part_filter_applied": bool(resolved_part),
+                "part_filter_total_cycles": 0,
+                "part_filter_matched_cycles": 0,
+                "part_filter_scope": "machine_only",
+                "part_filter_message": "No cleaned rows found.",
+            },
+        }
+        set_chart_data_cache(cache_key, payload, ttl_seconds=int(CHART_DATA_V2_CACHE_TTL_SEC))
+        payload = _mark_chart_payload_cache_meta(payload, cache_hit=False)
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        _record_chart_data_v2_observation(
+            status_code=200,
+            latency_ms=latency_seconds * 1000.0,
+            past_len=0,
+            future_len=0,
+            seam_ok=False,
+            part_filter_message="No cleaned rows found.",
+        )
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=200,
+            latency_seconds=latency_seconds,
+            cache_hit=False,
+        )
+        return payload
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=clamped_shift_hours)
+    df = df_full[df_full["timestamp"] >= pd.Timestamp(cutoff)]
+    if df.empty:
+        df = df_full.copy()
+
+    total_cycles = len(df)
+    filter_scope = "machine_only"
+    filter_message = "Part filter not requested."
+
+    if resolved_part:
+        before = len(df)
+        df = df[df["part_number"] == resolved_part]
+        filter_scope = "machine+part"
+        filter_message = (
+            "Part filter matched cleaned cycles."
+            if len(df) > 0
+            else f"No cleaned cycles matched part '{resolved_part}'."
+        )
+        if before > 0 and len(df) == 0:
+            # Keep endpoint usable for UI even if selected part is absent in window.
+            df = df_full[df_full["part_number"] == resolved_part]
+            if not df.empty:
+                filter_scope = "machine+part_historical"
+                filter_message = "Selected part not found in current window; using historical cleaned cycles."
+
+    if resolved_shift:
+        before = len(df)
+        df = df[df["shift"] == resolved_shift]
+        filter_scope = f"{filter_scope}+shift"
+        if before > 0 and len(df) == 0:
+            filter_message = f"No cleaned cycles matched shift '{resolved_shift}'."
+
+    if df.empty:
+        payload = {
+            "machine_id": resolved_machine_id,
+            "part_number": resolved_part,
+            "shift": resolved_shift,
+            "past": [],
+            "future": [],
+            "safe_limits": {},
+            "part_filter_applied": bool(resolved_part),
+            "part_filter_total_cycles": int(total_cycles),
+            "part_filter_matched_cycles": 0,
+            "part_filter_message": filter_message,
+            "meta": {
+                "source": "cleaned_data_v2",
+                "seam_ok": False,
+                "generated_at": _now_iso(),
+                "machine_id": resolved_machine_id,
+                "part_number": resolved_part,
+                "shift": resolved_shift,
+                "horizon_used_minutes": clamped_horizon,
+                "part_filter_applied": bool(resolved_part),
+                "part_filter_total_cycles": int(total_cycles),
+                "part_filter_matched_cycles": 0,
+                "part_filter_scope": filter_scope,
+                "part_filter_message": filter_message,
+                "past_last_ts": None,
+                "future_first_ts": None,
+            },
+        }
+        set_chart_data_cache(cache_key, payload, ttl_seconds=int(CHART_DATA_V2_CACHE_TTL_SEC))
+        payload = _mark_chart_payload_cache_meta(payload, cache_hit=False)
+        latency_seconds = max(0.0, time.perf_counter() - started_perf)
+        _record_chart_data_v2_observation(
+            status_code=200,
+            latency_ms=latency_seconds * 1000.0,
+            past_len=0,
+            future_len=0,
+            seam_ok=False,
+            part_filter_message=filter_message,
+        )
+        observe_chart_data_request(
+            endpoint=endpoint_label,
+            machine_id=resolved_machine_id,
+            status_code=200,
+            latency_seconds=latency_seconds,
+            cache_hit=False,
+        )
+        return payload
+
+    df = df.sort_values("timestamp").tail(clamped_history_limit).reset_index(drop=True)
+    response_part = resolved_part or str(df["part_number"].iloc[-1])
+
+    past_rates = pd.to_numeric(df["scrap_rate"], errors="coerce").fillna(0.0).clip(lower=0.0).tolist()
+    past_vol = _rolling_volatility_pct([float(v) for v in past_rates], window_size=6)
+    past_rows: List[Dict[str, Any]] = []
+    for idx, row in df.iterrows():
+        scrap_pct = float(past_rates[idx]) if idx < len(past_rates) else 0.0
+        scrap_prob = _clamp(scrap_pct / 100.0, 0.0, 1.0)
+        past_rows.append(
+            {
+                "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                "scrap_prob": round(scrap_prob, 6),
+                "scrap_pct": round(scrap_pct, 4),
+                "has_scrap": int(row.get("has_scrap", 0) or 0),
+                "shot_inc": int(_to_float(row.get("shot_inc")) or 0),
+                "scrap_inc": int(_to_float(row.get("scrap_inc")) or 0),
+                "part_number": str(row.get("part_number") or "UNKNOWN"),
+                "shift": str(row.get("shift") or ""),
+                "volatility_6pt": round(past_vol[idx], 4) if idx < len(past_vol) else 0.0,
+                "segment": "Past",
+                "source": "observed_cleaned",
+            }
+        )
+
+    sensor_cols = list(DEFAULT_SEQUENCE_SENSOR_COLUMNS)
+    sequence_steps = 60
+    try:
+        runtime = _ensure_sequence_runtime()
+        service = getattr(runtime, "service", None)
+        if service is not None and isinstance(getattr(service, "_meta", None), dict):
+            candidate_cols = service._meta.get("sensor_cols")  # pylint: disable=protected-access
+            if isinstance(candidate_cols, list) and candidate_cols:
+                sensor_cols = [str(col) for col in candidate_cols]
+            sequence_steps = max(10, min(int(service._meta.get("sequence_length", 60)), 240))  # pylint: disable=protected-access
+    except HTTPException:
+        runtime = None
+    except Exception:
+        runtime = None
+
+    sequence = _cleaned_frame_to_lstm_sequence(df, sensor_cols=sensor_cols, max_steps=sequence_steps)
+    horizon_cycles = _horizon_minutes_to_cycles(clamped_horizon)
+    lstm_prob: Optional[float] = None
+    lstm_rate: Optional[float] = None
+    lstm_detail: Optional[str] = None
+
+    if runtime is not None and len(sequence) >= 10:
+        lstm_start = time.perf_counter()
+        try:
+            prediction = runtime.predict_batch(
+                machine_id=resolved_machine_id,
+                sequence=sequence,
+                horizon_cycles=horizon_cycles,
+                part_number=response_part if response_part and response_part != "UNKNOWN" else None,
+                top_k=8,
+            )
+            lstm_prob = _to_float(prediction.get("scrap_probability"))
+            lstm_rate = _to_float(prediction.get("expected_scrap_rate"))
+        except Exception as exc:
+            lstm_detail = str(exc)
+        finally:
+            observe_lstm_inference(
+                machine_id=resolved_machine_id,
+                latency_seconds=max(0.0, time.perf_counter() - lstm_start),
+            )
+    else:
+        lstm_detail = "LSTM runtime unavailable or insufficient sequence length."
+
+    if lstm_prob is None:
+        lstm_prob = _clamp(float(np.mean(past_rates[-20:]) / 100.0) if past_rates else 0.0, 0.0, 1.0)
+
+    step_minutes = _infer_step_minutes_from_cleaned(df, default_minutes=5.0)
+    past_last_dt = pd.Timestamp(df["timestamp"].iloc[-1]).to_pydatetime()
+    future_rows: List[Dict[str, Any]] = []
+    for idx in range(max(1, horizon_cycles)):
+        ts = (past_last_dt + timedelta(minutes=step_minutes * (idx + 1))).isoformat()
+        base_prob = _clamp(float(lstm_prob), 0.0, 1.0)
+        base_pct = base_prob * 100.0
+        if lstm_rate is not None:
+            base_pct = _clamp(float(lstm_rate) * 100.0, 0.0, 100.0)
+            base_prob = _clamp(base_pct / 100.0, 0.0, 1.0)
+        future_rows.append(
+            {
+                "timestamp": ts,
+                "scrap_prob": round(base_prob, 6),
+                "scrap_pct": round(base_pct, 4),
+                "volatility_6pt": round(past_vol[-1] if past_vol else 0.0, 4),
+                "segment": "Future",
+                "source": "forecasted_lstm",
+            }
+        )
+
+    safe_limits = _compute_cleaned_safe_limits(df, sensor_cols=sensor_cols)
+    past_last_ts = past_rows[-1]["timestamp"] if past_rows else None
+    future_first_ts = future_rows[0]["timestamp"] if future_rows else None
+    seam_ok = False
+    if past_last_ts and future_first_ts:
+        past_dt = _parse_iso_timestamp(past_last_ts)
+        future_dt = _parse_iso_timestamp(future_first_ts)
+        seam_ok = bool(past_dt and future_dt and future_dt > past_dt)
+
+    payload = {
+        "machine_id": resolved_machine_id,
+        "part_number": response_part if response_part != "UNKNOWN" else None,
+        "shift": resolved_shift,
+        "past": past_rows,
+        "future": future_rows,
+        "safe_limits": safe_limits,
+        "part_filter_applied": bool(resolved_part),
+        "part_filter_total_cycles": int(total_cycles),
+        "part_filter_matched_cycles": int(len(df)),
+        "part_filter_message": filter_message,
+        "meta": {
+            "source": "cleaned_data_v2",
+            "generated_at": _now_iso(),
+            "machine_id": resolved_machine_id,
+            "part_number": response_part if response_part != "UNKNOWN" else None,
+            "shift": resolved_shift,
+            "horizon_used_minutes": clamped_horizon,
+            "horizon_cycles": int(horizon_cycles),
+            "seam_ok": seam_ok,
+            "past_last_ts": past_last_ts,
+            "future_first_ts": future_first_ts,
+            "part_filter_applied": bool(resolved_part),
+            "part_filter_total_cycles": int(total_cycles),
+            "part_filter_matched_cycles": int(len(df)),
+            "part_filter_scope": filter_scope,
+            "part_filter_message": filter_message,
+            "lstm_probability": round(float(lstm_prob), 6) if lstm_prob is not None else None,
+            "lstm_expected_scrap_rate": round(float(lstm_rate), 6) if lstm_rate is not None else None,
+            "lstm_detail": lstm_detail,
+            "cleaned_csv_path": str(_cleaned_machine_csv_path(resolved_machine_id)),
+        },
+    }
+    set_chart_data_cache(cache_key, payload, ttl_seconds=int(CHART_DATA_V2_CACHE_TTL_SEC))
+    payload = _mark_chart_payload_cache_meta(payload, cache_hit=False)
+    latency_seconds = max(0.0, time.perf_counter() - started_perf)
+    _record_chart_data_v2_observation(
+        status_code=200,
+        latency_ms=latency_seconds * 1000.0,
+        past_len=len(past_rows),
+        future_len=len(future_rows),
+        seam_ok=seam_ok,
+        part_filter_message=filter_message,
+    )
+    observe_chart_data_request(
+        endpoint=endpoint_label,
+        machine_id=resolved_machine_id,
+        status_code=200,
+        latency_seconds=latency_seconds,
+        cache_hit=False,
+    )
+    return payload
+
+
+@app.get("/api/admin/chart-rollout-metrics")
+async def get_chart_rollout_metrics():
+    with chart_rollout_lock:
+        metrics = dict(chart_rollout_metrics)
+        latencies = list(metrics.get("v2_latency_ms_recent") or [])
+
+    v2_requests = int(metrics.get("v2_requests", 0))
+    v2_success = int(metrics.get("v2_success", 0))
+    legacy_fallback_hits = int(metrics.get("legacy_fallback_hits", 0))
+    total_chart_attempts = v2_requests + legacy_fallback_hits
+    fallback_rate = (legacy_fallback_hits / total_chart_attempts) if total_chart_attempts > 0 else 0.0
+
+    latency_avg = float(sum(latencies) / len(latencies)) if latencies else 0.0
+    latency_p95 = 0.0
+    if latencies:
+        sorted_lat = sorted(latencies)
+        p95_index = max(0, min(len(sorted_lat) - 1, int(round((len(sorted_lat) - 1) * 0.95))))
+        latency_p95 = float(sorted_lat[p95_index])
+
+    return {
+        "ok": True,
+        "generated_at": _now_iso(),
+        "window_size": int(CHART_ROLLOUT_LATENCY_WINDOW),
+        "v2": {
+            "requests": v2_requests,
+            "success": v2_success,
+            "success_rate": round((v2_success / v2_requests), 6) if v2_requests > 0 else 0.0,
+            "http_4xx": int(metrics.get("v2_http_4xx", 0)),
+            "http_5xx": int(metrics.get("v2_http_5xx", 0)),
+            "empty_past": int(metrics.get("v2_empty_past", 0)),
+            "empty_future": int(metrics.get("v2_empty_future", 0)),
+            "seam_false": int(metrics.get("v2_seam_false", 0)),
+            "part_filter_message_nonempty": int(metrics.get("v2_part_filter_message_nonempty", 0)),
+            "latency_ms_avg": round(latency_avg, 3),
+            "latency_ms_p95": round(latency_p95, 3),
+        },
+        "fallback": {
+            "legacy_fallback_hits": legacy_fallback_hits,
+            "fallback_rate": round(fallback_rate, 6),
+        },
+        "last_updated": metrics.get("last_updated"),
+    }
+
+
+@app.get("/api/admin/cache/health")
+async def get_cache_health():
+    return {
+        "ok": True,
+        "generated_at": _now_iso(),
+        "cache": cache_health(),
+        "v2_cache_ttl_seconds": int(CHART_DATA_V2_CACHE_TTL_SEC),
+    }
+
+
+@app.post("/api/admin/cache/invalidate")
+async def invalidate_cache(machine_id: Optional[str] = None):
+    resolved_machine_id = _resolve_machine_id(machine_id) if machine_id else None
+    if machine_id and not resolved_machine_id:
+        raise HTTPException(status_code=400, detail=_machine_id_error_message(machine_id, _machine_match_candidates(machine_id)))
+    invalidate_machine_cache(resolved_machine_id)
+    return {
+        "ok": True,
+        "machine_id": resolved_machine_id,
+        "cache": cache_health(),
+        "message": "Cache invalidated",
+    }
+
+
+@app.get("/api/lstm/sequences/manifest")
+async def get_sequences_manifest():
+    compressed_manifest = Path(LSTM_CHUNKS_COMPRESSED_DIR) / "manifest.json"
+    plain_manifest = Path(CLEANED_DATA_OUTPUT_DIR) / "lstm_chunks" / "lstm_sequences_manifest.json"
+    target = compressed_manifest if compressed_manifest.exists() else plain_manifest
+    if not target.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                "Sequence manifest not found. Run backend_fastapi/optimize_sequences.py "
+                "or backend_fastapi/chunk_sequences.py first."
+            ),
+        )
+    try:
+        return json.loads(target.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to load sequence manifest: {exc}")
+
+
+@app.get("/api/lstm/sequences/chunk/{chunk_id}")
+async def get_sequence_chunk(chunk_id: int):
+    if chunk_id < 0:
+        raise HTTPException(status_code=400, detail="chunk_id must be >= 0")
+
+    gz_path = Path(LSTM_CHUNKS_COMPRESSED_DIR) / f"lstm_sequences_chunk_{chunk_id}.json.gz"
+    plain_path = Path(CLEANED_DATA_OUTPUT_DIR) / "lstm_chunks" / f"lstm_sequences_chunk_{chunk_id}.json"
+
+    if gz_path.exists():
+        try:
+            with gzip.open(gz_path, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            return {
+                "chunk_id": chunk_id,
+                "compressed": True,
+                "file": str(gz_path),
+                "sequence_count": len(data) if isinstance(data, list) else 0,
+                "sequences": data,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to decode compressed chunk {chunk_id}: {exc}")
+
+    if plain_path.exists():
+        try:
+            data = json.loads(plain_path.read_text(encoding="utf-8"))
+            return {
+                "chunk_id": chunk_id,
+                "compressed": False,
+                "file": str(plain_path),
+                "sequence_count": len(data) if isinstance(data, list) else 0,
+                "sequences": data,
+            }
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Failed to load chunk {chunk_id}: {exc}")
+
+    raise HTTPException(status_code=404, detail=f"Chunk {chunk_id} not found.")
+
+
+@app.get("/api/admin/data-quality")
+async def get_data_quality_status():
+    report_path = Path(DATA_QUALITY_REPORT_PATH)
+    if not report_path.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Data quality report not found: {report_path}. "
+                "Run backend_fastapi/data_quality.py or POST /api/admin/data-quality/check."
+            ),
+        )
+    try:
+        return json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to read data quality report: {exc}")
+
+
+@app.post("/api/admin/data-quality/check")
+async def trigger_data_quality_check():
+    try:
+        report = run_quality_check_for_all(Path(CLEANED_DATA_OUTPUT_DIR), machines=MACHINE_IDS)
+        report_path = Path(DATA_QUALITY_REPORT_PATH)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        return {
+            "ok": True,
+            "report_path": str(report_path),
+            "summary": report.get("summary", {}),
+        }
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Data quality check failed: {exc}")
+
+
+@app.get("/metrics")
+async def get_prometheus_metrics():
+    payload = get_metrics_payload()
+    response = Response(content=payload, media_type="text/plain; version=0.0.4")
+    if not metrics_enabled():
+        response.headers["X-Metrics-Runtime"] = "fallback"
+        response.headers["X-Metrics-Info"] = json.dumps(metrics_health_payload(), default=str)
+    return response
 
 
 @app.get("/api/fleet/chart-data")
@@ -4250,6 +5209,61 @@ async def get_machine_audit(
     }
 
 
+def _extract_counter_value(cycle_data: Dict[str, Any], *keys: str) -> Optional[float]:
+    if not isinstance(cycle_data, dict):
+        return None
+    for key in keys:
+        if key in cycle_data:
+            value = _to_float(cycle_data.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def _estimate_observed_scrap_probability(cycles: List[Any], window: int = 30) -> Optional[float]:
+    if not cycles:
+        return None
+    recent = list(cycles[-max(2, int(window)):])
+    scrap_vals: List[float] = []
+    shot_vals: List[float] = []
+
+    for cycle in recent:
+        data = getattr(cycle, "data", None) or {}
+        scrap = _extract_counter_value(data, "scrap_inc", "scrap_counter", "Scrap_counter")
+        shot = _extract_counter_value(data, "shot_inc", "shot_counter", "Shot_counter")
+        if scrap is None and shot is None:
+            continue
+        scrap_vals.append(float(scrap or 0.0))
+        shot_vals.append(float(shot or 0.0))
+
+    if not scrap_vals or not shot_vals:
+        return None
+
+    if any(_extract_counter_value((getattr(c, "data", None) or {}), "scrap_inc") is not None for c in recent):
+        total_shots = float(sum(max(0.0, v) for v in shot_vals))
+        if total_shots <= 0:
+            return 0.0
+        total_scrap = float(sum(max(0.0, v) for v in scrap_vals))
+        return _clamp(total_scrap / total_shots, 0.0, 1.0)
+
+    # Cumulative counter fallback: estimate per-cycle increments from positive diffs.
+    scrap_arr = np.asarray(scrap_vals, dtype=float)
+    shot_arr = np.asarray(shot_vals, dtype=float)
+    if len(scrap_arr) >= 2 and len(shot_arr) >= 2:
+        scrap_diff = np.diff(scrap_arr)
+        shot_diff = np.diff(shot_arr)
+        scrap_diff = np.where(scrap_diff < 0, scrap_arr[1:], scrap_diff)
+        shot_diff = np.where(shot_diff < 0, shot_arr[1:], shot_diff)
+        total_shots = float(np.clip(shot_diff, 0.0, None).sum())
+        total_scrap = float(np.clip(scrap_diff, 0.0, None).sum())
+        if total_shots > 0:
+            return _clamp(total_scrap / total_shots, 0.0, 1.0)
+
+    latest_shots = float(max(1.0, shot_arr[-1])) if len(shot_arr) else 1.0
+    latest_scrap = float(max(0.0, scrap_arr[-1])) if len(scrap_arr) else 0.0
+    return _clamp(latest_scrap / latest_shots, 0.0, 1.0)
+
+
 @app.get("/api/machines/{machine_id}/control-room")
 async def get_machine_control_room(
     machine_id: str,
@@ -4423,9 +5437,17 @@ async def get_machine_control_room(
     future_timeline = build_future_timeline(future_with_risk, safe_limits_raw)
 
     latest_cycle = recent_cycles[-1]
-    base_probability = 0.0
-    if latest_cycle.prediction and latest_cycle.prediction.scrap_probability is not None:
-        base_probability = _clamp(float(latest_cycle.prediction.scrap_probability), 0.0, 1.0)
+    base_probability = 0.05
+    observed_prob = _estimate_observed_scrap_probability(recent_cycles, window=30)
+    if observed_prob is not None:
+        base_probability = _clamp(float(observed_prob), 0.0, 1.0)
+    elif latest_cycle.prediction and latest_cycle.prediction.scrap_probability is not None:
+        model_prob = _clamp(float(latest_cycle.prediction.scrap_probability), 0.0, 1.0)
+        # Guard against stale/un-calibrated extremes from legacy prediction rows.
+        if model_prob < 0.001 or model_prob > 0.95:
+            base_probability = 0.05
+        else:
+            base_probability = model_prob
     elif not future_with_risk.empty:
         projected_prob = _to_float(future_with_risk.iloc[0].get("scrap_probability"))
         if projected_prob is not None:
@@ -4540,6 +5562,7 @@ async def get_machine_control_room(
         },
         "current_risk": {
             "base_probability": round(base_probability, 4),
+            "observed_probability": round(observed_prob, 4) if observed_prob is not None else None,
             "adjusted_probability": root_analysis.get("adjusted_risk", base_probability),
             "risk_penalty": root_analysis.get("risk_penalty", 0.0),
             "breach_count": root_analysis.get("breach_count", 0),
@@ -5424,6 +6447,85 @@ def get_data_quality_violations(
 
 # ==================== MODEL PERFORMANCE METRICS ENDPOINTS ====================
 
+def _compute_binary_classification_metrics(records: List[models.PredictionAccuracy]) -> Dict[str, Any]:
+    if not records:
+        return {
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1_score": 0.0,
+            "roc_auc": 0.0,
+            "brier_score": 0.0,
+            "true_positives": 0,
+            "false_positives": 0,
+            "true_negatives": 0,
+            "false_negatives": 0,
+            "samples_count": 0,
+            "avg_confidence": 0.0,
+            "confidence_std": 0.0,
+            "prediction_uncertainty_mean": 0.0,
+            "prediction_uncertainty_std": 0.0,
+        }
+
+    probs = np.asarray([_clamp(_to_float(r.predicted_scrap_probability) or 0.0, 0.0, 1.0) for r in records], dtype=float)
+    truths = np.asarray([1 if int(r.actual_scrap_event or 0) == 1 else 0 for r in records], dtype=int)
+    preds = (probs >= 0.5).astype(int)
+
+    tp = int(np.logical_and(preds == 1, truths == 1).sum())
+    tn = int(np.logical_and(preds == 0, truths == 0).sum())
+    fp = int(np.logical_and(preds == 1, truths == 0).sum())
+    fn = int(np.logical_and(preds == 0, truths == 1).sum())
+
+    total = max(1, len(truths))
+    accuracy = float((tp + tn) / total)
+    precision = float(tp / max(1, tp + fp))
+    recall = float(tp / max(1, tp + fn))
+    f1 = float((2 * precision * recall) / max(1e-12, precision + recall))
+    brier = float(np.mean((probs - truths) ** 2))
+
+    roc_auc = 0.0
+    if roc_auc_score is not None:
+        try:
+            if len(np.unique(truths)) > 1:
+                roc_auc = float(roc_auc_score(truths, probs))
+        except Exception:
+            roc_auc = 0.0
+
+    confidence = np.maximum(probs, 1.0 - probs)
+    uncertainty = np.abs(probs - 0.5)
+
+    return {
+        "accuracy": round(accuracy, 6),
+        "precision": round(precision, 6),
+        "recall": round(recall, 6),
+        "f1_score": round(f1, 6),
+        "roc_auc": round(roc_auc, 6),
+        "brier_score": round(brier, 6),
+        "true_positives": tp,
+        "false_positives": fp,
+        "true_negatives": tn,
+        "false_negatives": fn,
+        "samples_count": int(len(records)),
+        "avg_confidence": round(float(np.mean(confidence)), 6),
+        "confidence_std": round(float(np.std(confidence)), 6),
+        "prediction_uncertainty_mean": round(float(np.mean(uncertainty)), 6),
+        "prediction_uncertainty_std": round(float(np.std(uncertainty)), 6),
+    }
+
+
+def _query_prediction_accuracy_records(
+    db: Session,
+    model_id: str,
+    machine_id: Optional[str] = None,
+    cutoff_time: Optional[datetime] = None,
+) -> List[models.PredictionAccuracy]:
+    query = db.query(models.PredictionAccuracy).filter(models.PredictionAccuracy.model_id == model_id)
+    if machine_id:
+        query = query.filter(models.PredictionAccuracy.machine_id == machine_id)
+    if cutoff_time is not None:
+        query = query.filter(models.PredictionAccuracy.evaluated_at >= cutoff_time)
+    return query.all()
+
 @app.get("/api/ai/model-metrics/{model_id}")
 @database.with_reconnect(max_retries=3)
 def get_model_metrics(
@@ -5433,6 +6535,26 @@ def get_model_metrics(
     db: Session = Depends(get_db)
 ):
     """Get latest performance metrics for a specific model."""
+    cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+    # Prefer live computation from prediction_accuracy whenever rows exist.
+    # This avoids serving stale zeroed metrics from historical snapshots.
+    records = _query_prediction_accuracy_records(
+        db=db,
+        model_id=model_id,
+        machine_id=machine_id,
+        cutoff_time=cutoff_time,
+    )
+    if records:
+        computed = _compute_binary_classification_metrics(records)
+        return {
+            "model_id": model_id,
+            "machine_id": machine_id,
+            "evaluated_at": _now_iso(),
+            "source": "prediction_accuracy_live",
+            "metrics": computed,
+        }
+
     query = db.query(models.ModelPerformanceMetrics).filter(
         models.ModelPerformanceMetrics.model_id == model_id
     )
@@ -5445,35 +6567,54 @@ def get_model_metrics(
     # Get most recent metrics
     latest = query.order_by(models.ModelPerformanceMetrics.evaluated_at.desc()).first()
 
-    if not latest:
+    if latest and (latest.samples_count or 0) > 0:
         return {
-            "model_id": model_id,
-            "machine_id": machine_id,
-            "message": "No metrics available yet",
-            "metrics": None
+            "model_id": latest.model_id,
+            "machine_id": latest.machine_id,
+            "evaluated_at": latest.evaluated_at.isoformat() if latest.evaluated_at else None,
+            "source": "model_performance_metrics",
+            "metrics": {
+                "accuracy": latest.accuracy,
+                "precision": latest.precision,
+                "recall": latest.recall,
+                "f1_score": latest.f1_score,
+                "roc_auc": latest.roc_auc,
+                "brier_score": latest.brier_score,
+                "true_positives": latest.true_positives,
+                "false_positives": latest.false_positives,
+                "true_negatives": latest.true_negatives,
+                "false_negatives": latest.false_negatives,
+                "avg_confidence": latest.avg_confidence,
+                "confidence_std": latest.confidence_std,
+                "prediction_uncertainty_mean": latest.prediction_uncertainty_mean,
+                "prediction_uncertainty_std": latest.prediction_uncertainty_std,
+                "samples_count": latest.samples_count,
+            }
         }
 
     return {
-        "model_id": latest.model_id,
-        "machine_id": latest.machine_id,
-        "evaluated_at": latest.evaluated_at.isoformat() if latest.evaluated_at else None,
+        "model_id": model_id,
+        "machine_id": machine_id,
+        "evaluated_at": None,
+        "source": "none",
+        "message": "No evaluation data available.",
         "metrics": {
-            "accuracy": latest.accuracy,
-            "precision": latest.precision,
-            "recall": latest.recall,
-            "f1_score": latest.f1_score,
-            "roc_auc": latest.roc_auc,
-            "brier_score": latest.brier_score,
-            "true_positives": latest.true_positives,
-            "false_positives": latest.false_positives,
-            "true_negatives": latest.true_negatives,
-            "false_negatives": latest.false_negatives,
-            "avg_confidence": latest.avg_confidence,
-            "confidence_std": latest.confidence_std,
-            "prediction_uncertainty_mean": latest.prediction_uncertainty_mean,
-            "prediction_uncertainty_std": latest.prediction_uncertainty_std,
-            "samples_count": latest.samples_count,
-        }
+            "accuracy": 0.0,
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1_score": 0.0,
+            "roc_auc": 0.0,
+            "brier_score": 0.0,
+            "true_positives": 0,
+            "false_positives": 0,
+            "true_negatives": 0,
+            "false_negatives": 0,
+            "avg_confidence": 0.0,
+            "confidence_std": 0.0,
+            "prediction_uncertainty_mean": 0.0,
+            "prediction_uncertainty_std": 0.0,
+            "samples_count": 0,
+        },
     }
 
 
@@ -5564,22 +6705,72 @@ def compare_models(
 @database.with_reconnect(max_retries=3)
 def get_metrics_dashboard(
     hours: int = 24,
+    machine_id: Optional[str] = None,
+    model_id: str = "lightgbm_v1",
     db: Session = Depends(get_db)
 ):
     """Get fleet-wide aggregated performance metrics."""
     cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
 
+    live_records = _query_prediction_accuracy_records(
+        db=db,
+        model_id=model_id,
+        machine_id=machine_id,
+        cutoff_time=cutoff_time,
+    )
+    if live_records:
+        fleet_metrics_live = _compute_binary_classification_metrics(live_records)
+        grouped: Dict[str, List[models.PredictionAccuracy]] = {}
+        for row in live_records:
+            key = str(row.machine_id or "unknown")
+            grouped.setdefault(key, []).append(row)
+
+        per_machine_live = {
+            key: {
+                **_compute_binary_classification_metrics(rows),
+                "model_id": model_id,
+                "evaluated_at": _now_iso(),
+            }
+            for key, rows in grouped.items()
+        }
+
+        return {
+            "timestamp": _now_iso(),
+            "window_hours": hours,
+            "source": "prediction_accuracy_live",
+            "fleet_metrics": {
+                "avg_accuracy": fleet_metrics_live["accuracy"],
+                "avg_precision": fleet_metrics_live["precision"],
+                "avg_recall": fleet_metrics_live["recall"],
+                "avg_f1": fleet_metrics_live["f1_score"],
+                "avg_roc_auc": fleet_metrics_live["roc_auc"],
+                "brier_score": fleet_metrics_live["brier_score"],
+                "total_samples": fleet_metrics_live["samples_count"],
+            },
+            "per_machine": per_machine_live,
+            "machine_id": machine_id,
+            "model_id": model_id,
+        }
+
     # Get all models' global metrics
-    global_metrics = db.query(models.ModelPerformanceMetrics).filter(
+    global_query = db.query(models.ModelPerformanceMetrics).filter(
         models.ModelPerformanceMetrics.machine_id.is_(None),
         models.ModelPerformanceMetrics.evaluated_at >= cutoff_time
-    ).all()
+    )
+    if model_id:
+        global_query = global_query.filter(models.ModelPerformanceMetrics.model_id == model_id)
+    global_metrics = global_query.all()
 
     # Get per-machine metrics
-    per_machine = db.query(models.ModelPerformanceMetrics).filter(
+    per_machine_query = db.query(models.ModelPerformanceMetrics).filter(
         models.ModelPerformanceMetrics.machine_id.isnot(None),
         models.ModelPerformanceMetrics.evaluated_at >= cutoff_time
-    ).all()
+    )
+    if model_id:
+        per_machine_query = per_machine_query.filter(models.ModelPerformanceMetrics.model_id == model_id)
+    if machine_id:
+        per_machine_query = per_machine_query.filter(models.ModelPerformanceMetrics.machine_id == machine_id)
+    per_machine = per_machine_query.all()
 
     # Aggregate global metrics
     fleet_metrics = {
@@ -5640,8 +6831,11 @@ def get_metrics_dashboard(
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "window_hours": hours,
+        "source": "model_performance_metrics",
         "fleet_metrics": fleet_metrics,
         "per_machine": machine_metrics,
+        "machine_id": machine_id,
+        "model_id": model_id,
     }
 
 

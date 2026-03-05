@@ -99,6 +99,8 @@ export const useTelemetryStore = create((set, get) => ({
     controlRoomLoading: false,
     chartData: null,
     chartDataLoading: false,
+    chartDataCache: {},
+    chartCacheTTL: 5 * 60 * 1000,
     fleetChartData: null,
     fleetChartDataLoading: false,
     lstmPreview: null,
@@ -269,21 +271,58 @@ export const useTelemetryStore = create((set, get) => ({
         horizonMinutes = 60,
     ) {
         if (!machineId) return;
+        const normalizedPart = partNumber && String(partNumber).trim() ? String(partNumber).trim() : '';
+        const normalizedHorizon = String(Math.max(5, Math.min(Number(horizonMinutes) || 60, 1920)));
+        const cacheKey = `${machineId}:${normalizedPart || '_'}:${normalizedHorizon}`;
+        const now = Date.now();
+        const cached = get().chartDataCache[cacheKey];
+        if (cached && typeof cached === 'object' && cached.expiry > now && cached.data) {
+            set({
+                chartData: cached.data,
+                chartDataLoading: false,
+                lastChartDataRefreshAt: now,
+            });
+            return;
+        }
+
         set({ chartDataLoading: true });
         try {
             const query = new URLSearchParams({
-                horizon_minutes: String(Math.max(5, Math.min(Number(horizonMinutes) || 60, 1920))),
+                horizon_minutes: normalizedHorizon,
                 history_limit: '500',
                 shift_hours: '24',
             });
-            if (partNumber && String(partNumber).trim()) {
-                query.set('part_number', String(partNumber).trim());
+            if (normalizedPart) {
+                query.set('part_number', normalizedPart);
             }
-            const payload = await fetchJson(`${API_BASE}/machines/${machineId}/chart-data?${query.toString()}`, {
-                retries: 2,
-                timeoutMs: 30000,
-            });
+            const v2Url = `${API_BASE}/machines/${machineId}/chart-data-v2?${query.toString()}`;
+            const legacyQuery = new URLSearchParams(query);
+            legacyQuery.set('source', 'fallback_v2');
+            const legacyUrl = `${API_BASE}/machines/${machineId}/chart-data?${legacyQuery.toString()}`;
+
+            let payload;
+            try {
+                payload = await fetchJson(v2Url, {
+                    retries: 1,
+                    timeoutMs: 30000,
+                });
+            } catch (v2Err) {
+                console.warn(`chart-data-v2 failed for ${machineId}, falling back to legacy endpoint:`, v2Err);
+                payload = await fetchJson(legacyUrl, {
+                    retries: 2,
+                    timeoutMs: 30000,
+                });
+            }
+            const currentCache = get().chartDataCache || {};
+            const nextCache = {
+                ...currentCache,
+                [cacheKey]: {
+                    data: payload,
+                    expiry: now + get().chartCacheTTL,
+                },
+            };
             set({
+                chartDataCache: nextCache,
                 chartData: payload,
                 chartDataLoading: false,
                 lastChartDataRefreshAt: Date.now(),

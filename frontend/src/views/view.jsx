@@ -40,7 +40,20 @@ export default function DashboardView({ onNav }) {
         return () => clearInterval(refreshInterval);
     }, [currentMachine, partNumber]); // machine-driven + part-driven + time-driven refresh
 
-    const prob = latest?.predictions?.scrap_probability ?? 0;
+    const observedRisk = Number(controlRoom?.current_risk?.observed_probability);
+    const baseRisk = Number(controlRoom?.current_risk?.base_probability);
+    const adjustedRisk = Number(controlRoom?.current_risk?.adjusted_probability);
+    const latestPredRisk = Number(latest?.predictions?.scrap_probability);
+    const probRaw = Number.isFinite(observedRisk)
+        ? observedRisk
+        : Number.isFinite(baseRisk)
+            ? baseRisk
+            : Number.isFinite(latestPredRisk)
+                ? latestPredRisk
+                : Number.isFinite(adjustedRisk)
+                    ? adjustedRisk
+                    : 0;
+    const prob = Math.max(0, Math.min(1, probRaw));
     const pct = +(prob * 100).toFixed(1);
     const level = prob >= 0.9 ? 'crit' : prob >= 0.65 ? 'warn' : 'ok';
     const levelColor = { ok: 'var(--status-ok)', warn: 'var(--status-warn)', crit: 'var(--status-crit)' }[level];

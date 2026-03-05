@@ -21,7 +21,7 @@ def repair():
         # 1. Clear miscalibrated predictions (Bug #1)
         # Any prediction with scrap_prob > 0.95 and high confidence is likely stale noise
         # unless real events match it.
-        cur.execute("UPDATE machine_predictions SET scrap_probability = 0.0, confidence = 0.5 WHERE scrap_probability > 0.95")
+        cur.execute("UPDATE predictions SET scrap_probability = 0.0, confidence = 0.5 WHERE scrap_probability > 0.95")
         updated = cur.rowcount
         
         # 2. Reset ingestion cursor if requested (optional)

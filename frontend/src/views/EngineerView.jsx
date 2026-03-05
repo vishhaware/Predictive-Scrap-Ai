@@ -156,8 +156,21 @@ export default function EngineerView() {
         });
     }, [latest, telemetryParams]);
 
-    const scrapProbability = Number(latest?.predictions?.scrap_probability ?? 0);
-    const scrapRiskPct = Number.isFinite(scrapProbability) ? scrapProbability * 100 : 0;
+    const observedRisk = Number(controlRoom?.current_risk?.observed_probability);
+    const baseRisk = Number(controlRoom?.current_risk?.base_probability);
+    const adjustedRisk = Number(controlRoom?.current_risk?.adjusted_probability);
+    const latestPredRisk = Number(latest?.predictions?.scrap_probability);
+    const scrapProbabilityRaw = Number.isFinite(observedRisk)
+        ? observedRisk
+        : Number.isFinite(baseRisk)
+            ? baseRisk
+            : Number.isFinite(latestPredRisk)
+                ? latestPredRisk
+                : Number.isFinite(adjustedRisk)
+                    ? adjustedRisk
+                    : 0;
+    const scrapProbability = Math.max(0, Math.min(1, scrapProbabilityRaw));
+    const scrapRiskPct = scrapProbability * 100;
     const criticalCount = telemetryRows.filter((row) => row.status === 'crit').length;
     const warningCount = telemetryRows.filter((row) => row.status === 'warn').length;
     const healthyCount = telemetryRows.filter((row) => row.status === 'ok').length;
