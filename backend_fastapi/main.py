@@ -218,11 +218,24 @@ class TelemetryValue(BaseModel):
     forecast_1h: Optional[Forecast1h] = None
 
 class CyclePayload(BaseModel):
+    row_id: Optional[int] = None
     cycle_id: str
     timestamp: str
     telemetry: Dict[str, TelemetryValue]
     predictions: Optional[PredictionSchema] = None
     shap_attributions: List[Dict[str, Any]] = []
+
+
+class CycleDeltaCursor(BaseModel):
+    last_ts: Optional[str] = None
+    last_row_id: Optional[int] = None
+
+
+class CycleDeltaResponse(BaseModel):
+    machine_id: str
+    items: List[CyclePayload]
+    cursor: CycleDeltaCursor
+    has_more: bool
 
 class MachineSummary(BaseModel):
     id: str
@@ -2048,6 +2061,7 @@ def _cycle_to_payload(cycle: models.Cycle) -> Dict[str, Any]:
     feature_spec_hash = prediction_attrs.get("_feature_spec_hash")
     xai_summary = prediction_attrs.get("_xai_summary")
     payload = {
+        "row_id": int(cycle.id) if getattr(cycle, "id", None) is not None else None,
         "cycle_id": cycle.cycle_id,
         "timestamp": cycle.timestamp.isoformat(),
         "telemetry": cycle.data,

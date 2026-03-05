@@ -19,6 +19,7 @@ class Cycle(Base):
     __table_args__ = (
         UniqueConstraint('machine_id', 'timestamp', name='_machine_timestamp_uc'),
         Index('idx_cycle_machine_timestamp', 'machine_id', 'timestamp'),
+        Index('idx_cycle_machine_timestamp_id', 'machine_id', 'timestamp', 'id'),
     )
 
 class Prediction(Base):
@@ -50,6 +51,25 @@ class MachineStats(Base):
     abnormal_params = Column(JSON, default=list)
     maintenance_urgency = Column(String, default="LOW")
     last_part_number = Column(String)
+
+
+class IngestionCursor(Base):
+    __tablename__ = "ingestion_cursors"
+
+    id = Column(Integer, primary_key=True, index=True)
+    machine_id = Column(String, nullable=False, index=True)
+    file_path = Column(String, nullable=False, index=True)
+    offset = Column(Integer, default=0)
+    size = Column(Integer, default=0)
+    mtime = Column(Float, default=0.0)
+    last_timestamp = Column(String)
+    fieldnames = Column(JSON)
+    updated_at = Column(DateTime, default=lambda: datetime.datetime.now(datetime.timezone.utc), index=True)
+
+    __table_args__ = (
+        UniqueConstraint('machine_id', 'file_path', name='_ingestion_cursor_machine_file_uc'),
+        Index('idx_ingestion_cursor_machine_file', 'machine_id', 'file_path'),
+    )
 
 
 # Feature 1: Parameter Management Tables

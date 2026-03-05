@@ -48,6 +48,14 @@ def _sqlite_table_columns(conn, table_name: str):
     return [row[1] for row in conn.execute(text(f"PRAGMA table_info({table_name})")).fetchall()]
 
 
+def _sqlite_index_exists(conn, index_name: str) -> bool:
+    rows = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='index' AND name=:index_name"),
+        {"index_name": index_name},
+    ).fetchall()
+    return bool(rows)
+
+
 def _apply_sqlite_compat_migrations():
     """
     Lightweight compatibility migrations for SQLite installations where
@@ -77,6 +85,43 @@ def _apply_sqlite_compat_migrations():
                 continue
             conn.execute(text(f"ALTER TABLE machine_stats ADD COLUMN {column_name} {column_sql}"))
             print(f"🛠️ SQLite migration: added machine_stats.{column_name}")
+
+        if not _sqlite_table_exists(conn, "ingestion_cursors"):
+            conn.execute(text("""
+                CREATE TABLE ingestion_cursors (
+                    id INTEGER PRIMARY KEY,
+                    machine_id VARCHAR NOT NULL,
+                    file_path VARCHAR NOT NULL,
+                    offset INTEGER DEFAULT 0,
+                    size INTEGER DEFAULT 0,
+                    mtime FLOAT DEFAULT 0,
+                    last_timestamp VARCHAR,
+                    fieldnames JSON,
+                    updated_at DATETIME
+                )
+            """))
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS _ingestion_cursor_machine_file_uc "
+                    "ON ingestion_cursors (machine_id, file_path)"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_ingestion_cursor_machine_file "
+                    "ON ingestion_cursors (machine_id, file_path)"
+                )
+            )
+            print("🛠️ SQLite migration: created ingestion_cursors table")
+
+        if not _sqlite_index_exists(conn, "idx_cycle_machine_timestamp_id"):
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_cycle_machine_timestamp_id "
+                    "ON cycles (machine_id, timestamp, id)"
+                )
+            )
+            print("🛠️ SQLite migration: created idx_cycle_machine_timestamp_id")
 
 def force_rebuild_engine():
     """If not connected, rebuilds the connection engine entirely."""
