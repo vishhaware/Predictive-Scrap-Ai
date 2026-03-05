@@ -35,7 +35,10 @@ def _extract_counter(data: Dict[str, Any], *keys: str) -> Optional[float]:
         return None
     for key in keys:
         if key in data:
-            value = _safe_float(data.get(key))
+            raw_value = data.get(key)
+            if isinstance(raw_value, dict):
+                raw_value = raw_value.get("value")
+            value = _safe_float(raw_value)
             if value is not None:
                 return value
     return None

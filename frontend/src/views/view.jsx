@@ -44,9 +44,9 @@ export default function DashboardView({ onNav }) {
     const baseRisk = Number(controlRoom?.current_risk?.base_probability);
     const adjustedRisk = Number(controlRoom?.current_risk?.adjusted_probability);
     const latestPredRisk = Number(latest?.predictions?.scrap_probability);
-    const probRaw = Number.isFinite(observedRisk)
+    const probRaw = (Number.isFinite(observedRisk) && observedRisk > 0)
         ? observedRisk
-        : Number.isFinite(baseRisk)
+        : (Number.isFinite(baseRisk) && baseRisk > 0)
             ? baseRisk
             : Number.isFinite(latestPredRisk)
                 ? latestPredRisk

@@ -5214,7 +5214,10 @@ def _extract_counter_value(cycle_data: Dict[str, Any], *keys: str) -> Optional[f
         return None
     for key in keys:
         if key in cycle_data:
-            value = _to_float(cycle_data.get(key))
+            raw_value = cycle_data.get(key)
+            if isinstance(raw_value, dict):
+                raw_value = raw_value.get("value")
+            value = _to_float(raw_value)
             if value is not None:
                 return value
     return None
@@ -5452,6 +5455,8 @@ async def get_machine_control_room(
         projected_prob = _to_float(future_with_risk.iloc[0].get("scrap_probability"))
         if projected_prob is not None:
             base_probability = _clamp(projected_prob, 0.0, 1.0)
+    # Keep base risk in a practical operating band for operator UI.
+    base_probability = _clamp(base_probability, 0.01, 1.0)
 
     current_state = {key: float(value) for key, value in history_df.iloc[-1].to_dict().items() if _to_float(value) is not None}
     root_analysis = analyze_root_causes(current_state, safe_limits_raw, base_probability)
