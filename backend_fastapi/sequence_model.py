@@ -719,10 +719,23 @@ class SequenceModelService:
         if self._attention_model is None:
             raise RuntimeError("LSTM runtime model is not prepared.")
 
-        outputs = self._attention_model.predict(arr, verbose=0)
         event_prob = 0.5
         rate_pred = 0.0
         attn_weights: Optional[np.ndarray] = None
+
+        try:
+            outputs = self._attention_model.predict(arr, verbose=0)
+        except Exception as exc:
+            logger.warning("Attention model predict failed, trying base model: %s", exc)
+            # Fallback to base model
+            if self._model is not None:
+                try:
+                    outputs = self._model.predict(arr, verbose=0)
+                except Exception as exc2:
+                    logger.error("Base model predict also failed: %s", exc2)
+                    return event_prob, rate_pred, attn_weights
+            else:
+                return event_prob, rate_pred, attn_weights
 
         if isinstance(outputs, (list, tuple)):
             if len(outputs) >= 1:

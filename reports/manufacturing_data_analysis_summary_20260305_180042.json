@@ -1,0 +1,18 @@
+{
+  "generated_at": "2026-03-05 18:00:42.205543",
+  "data_dir": "c:\\new project\\New folder\\frontend\\Data",
+  "outputs": {
+    "txt": "c:\\new project\\New folder\\reports\\manufacturing_data_analysis_report_20260305_180042.txt",
+    "json": "c:\\new project\\New folder\\reports\\manufacturing_data_analysis_summary_20260305_180042.json",
+    "pdf_downloads": "C:\\Users\\Datta\\Downloads\\manufacturing_data_analysis_report_20260305_180042.pdf",
+    "pdf_repo": "c:\\new project\\New folder\\reports\\manufacturing_data_analysis_report_20260305_180042.pdf"
+  },
+  "mes_scrap_rate_pct": 8.37887076175343,
+  "machine_scrap_rates": {
+    "M231-11": 0.2523355484927285,
+    "M356-57": 0.6480109928385791,
+    "M471-23": 0.29565591039252975,
+    "M607-30": 0.43577348973452956,
+    "M612-33": 1.0265080611074209
+  }
+}

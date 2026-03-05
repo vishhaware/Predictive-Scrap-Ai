@@ -135,59 +135,83 @@ def _load_user_parameter_overrides(
     except ImportError:
         import models
 
-    # Try part-specific override
-    if machine_id and part_number:
-        override = session.query(models.ParameterConfig).filter(
-            models.ParameterConfig.parameter_name == sensor_name,
-            models.ParameterConfig.machine_id == machine_id,
-            models.ParameterConfig.part_number == _normalize_part_number(part_number),
-            models.ParameterConfig.is_active == 1
-        ).first()
-        if override:
-            return {
-                "plus": override.tolerance_plus,
-                "minus": override.tolerance_minus,
-                "setpoint": override.default_set_value,
-                "source": "user_override"
-            }
+    normalized_part = _normalize_part_number(part_number)
+    sensor_key = str(sensor_name).strip()
+    if not sensor_key:
+        return None
 
-    # Try machine-specific override
-    if machine_id:
-        override = session.query(models.ParameterConfig).filter(
-            models.ParameterConfig.parameter_name == sensor_name,
-            models.ParameterConfig.machine_id == machine_id,
-            models.ParameterConfig.part_number.is_(None),
-            models.ParameterConfig.is_active == 1
-        ).first()
-        if override:
-            return {
-                "plus": override.tolerance_plus,
-                "minus": override.tolerance_minus,
-                "setpoint": override.default_set_value,
-                "source": "user_override"
-            }
-
-    # Try global override
-    override = session.query(models.ParameterConfig).filter(
-        models.ParameterConfig.parameter_name == sensor_name,
-        models.ParameterConfig.machine_id.is_(None),
-        models.ParameterConfig.part_number.is_(None),
-        models.ParameterConfig.is_active == 1
-    ).first()
-    if override:
+    def _to_payload(override: Any, scope: str) -> Dict[str, Any]:
+        plus = _to_float(getattr(override, "tolerance_plus", None))
+        minus = _to_float(getattr(override, "tolerance_minus", None))
+        setpoint = _to_float(getattr(override, "default_set_value", None))
         return {
-            "plus": override.tolerance_plus,
-            "minus": override.tolerance_minus,
-            "setpoint": override.default_set_value,
-            "source": "user_override"
+            "plus": plus,
+            "minus": minus,
+            "setpoint": setpoint,
+            "tolerance_plus": plus,
+            "tolerance_minus": minus,
+            "default_set_value": setpoint,
+            "source": "user_override",
+            "status_source": "db_override",
+            "scope": scope,
         }
+
+    # 1) Machine + part override (most specific)
+    if machine_id and normalized_part:
+        override = (
+            session.query(models.ParameterConfig)
+            .filter(
+                models.ParameterConfig.parameter_name.ilike(sensor_key),
+                models.ParameterConfig.is_active == 1,
+                models.ParameterConfig.machine_id == machine_id,
+                models.ParameterConfig.part_number.isnot(None),
+                models.ParameterConfig.part_number.ilike(normalized_part),
+            )
+            .order_by(models.ParameterConfig.updated_at.desc(), models.ParameterConfig.id.desc())
+            .first()
+        )
+        if override:
+            return _to_payload(override, "machine+part")
+
+    # 2) Machine-level override (all parts)
+    if machine_id:
+        override = (
+            session.query(models.ParameterConfig)
+            .filter(
+                models.ParameterConfig.parameter_name.ilike(sensor_key),
+                models.ParameterConfig.is_active == 1,
+                models.ParameterConfig.machine_id == machine_id,
+                models.ParameterConfig.part_number.is_(None),
+            )
+            .order_by(models.ParameterConfig.updated_at.desc(), models.ParameterConfig.id.desc())
+            .first()
+        )
+        if override:
+            return _to_payload(override, "machine")
+
+    # 3) Global override
+    override = (
+        session.query(models.ParameterConfig)
+        .filter(
+            models.ParameterConfig.parameter_name.ilike(sensor_key),
+            models.ParameterConfig.is_active == 1,
+            models.ParameterConfig.machine_id.is_(None),
+            models.ParameterConfig.part_number.is_(None),
+        )
+        .order_by(models.ParameterConfig.updated_at.desc(), models.ParameterConfig.id.desc())
+        .first()
+    )
+    if override:
+        return _to_payload(override, "global")
 
     return None
 
 
 def calculate_dynamic_limits(
     recent_history: pd.DataFrame,
+    machine_id: Optional[str] = None,
     part_number: Optional[str] = None,
+    db: Any = None,
 ) -> Dict[str, Dict[str, Any]]:
     """
     Acts as a universal, 2-bucket engine based strictly on CSV tolerances (Part 3 Calibration).
@@ -211,10 +235,21 @@ def calculate_dynamic_limits(
     # Step 2: Loop through every sensor and apply Bucket logic
     for sensor, median_val in local_median.items():
         median_val = float(median_val) if not pd.isna(median_val) else 0.0
-        rule, status_source = _resolve_sensor_rule(str(sensor), part_number)
+        sensor_name = str(sensor)
+        override_rule = _load_user_parameter_overrides(
+            db,
+            sensor_name=sensor_name,
+            machine_id=machine_id,
+            part_number=part_number,
+        )
+        if override_rule:
+            rule = override_rule
+            status_source = str(override_rule.get("status_source") or "db_override")
+        else:
+            rule, status_source = _resolve_sensor_rule(sensor_name, part_number)
 
-        tol_plus = rule.get("plus")
-        tol_minus = rule.get("minus")
+        tol_plus = _to_float(rule.get("plus"))
+        tol_minus = _to_float(rule.get("minus"))
         official_setpoint = _to_float(rule.get("setpoint"))
 
         # Bucket A (Hard CSV Tolerances)
@@ -222,7 +257,7 @@ def calculate_dynamic_limits(
             base_setpoint = official_setpoint if official_setpoint is not None else median_val
             min_limit = base_setpoint - abs(tol_minus)
             max_limit = base_setpoint + abs(tol_plus)
-            source = "csv_tolerance"
+            source = str(rule.get("source") or "csv_tolerance")
         else:
             # Bucket C (Statistical / 'N/A' Fallback)
             std_val = float(local_std.get(sensor, 0.0)) if not pd.isna(local_std.get(sensor)) else 0.0
@@ -237,7 +272,7 @@ def calculate_dynamic_limits(
         if _requires_non_negative_min(str(sensor)):
             min_limit = max(0.0, min_limit)
 
-        limits[str(sensor)] = {
+        limits[sensor_name] = {
             "min": float(min_limit),
             "max": float(max_limit),
             "median": float(median_val),
@@ -247,6 +282,24 @@ def calculate_dynamic_limits(
         }
 
     return limits
+
+
+def calculate_safe_limits(
+    machine_id: Optional[str],
+    part_number: Optional[str],
+    history_df: pd.DataFrame,
+    db: Any = None,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Compatibility wrapper:
+    calculate machine + part aware safe limits using DB overrides when available.
+    """
+    return calculate_dynamic_limits(
+        recent_history=history_df,
+        machine_id=machine_id,
+        part_number=part_number,
+        db=db,
+    )
 
 
 load_physics_rules()

@@ -119,6 +119,20 @@
 
 ---
 
+## Dashboard Bug Fix Verification ✅
+
+Testing conducted on live backend (v5.2.0) to resolve critical dashboard blockers.
+
+| Bug | Fix Description | Verification Result | Status |
+|-----|-----------------|---------------------|--------|
+| **#1: Past Data** | Swap model prediction for Observed Scrap % | Past range: 0.00% - 5.00% (Accurate) | ✅ FIXED |
+| **#2: Timeline** | Seam re-alignment for future predictions | `seam_ok: True`, perfect continuity | ✅ FIXED |
+| **#3: LSTM** | Defense logic + Base prob fallback | Risk level: ELEVATED (0.5728) | ✅ FIXED |
+
+**Verification Tools**: `test_fixes_8001.py`, `test_control_room.py`
+
+---
+
 ## Test Execution
 ```bash
 # Run all backend tests

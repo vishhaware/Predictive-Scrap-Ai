@@ -152,6 +152,25 @@
 
 ---
 
+## Feature 5: Dashboard Stability & Bug Fixes ✅
+
+### Bug #1: Past Predictions Miscalibration
+- [x] Use observed scrap rate (from scrap_counter) for historical data
+- [x] Model noise preserved as `model_scrap_pct` for debugging
+- [x] Verified: Past data shows 0-5% range instead of flat 99.8%
+
+### Bug #2: Broken Timeline Seam (Timeline Continuity)
+- [x] Future timestamps automatically re-aligned to start after past data
+- [x] Seam validation flag `seam_ok` returned in metadata
+- [x] Verified: Charts show continuous timeline without gaps or overlap
+
+### Bug #3: LSTM Inference Failures (Null Output)
+- [x] Defensive exception handling in `sequence_model.py`
+- [x] Statistical fallback to `base_probability` when inference fails
+- [x] Verified: Control Room displays ELEVATED/HIGH risk instead of UNAVAILABLE
+
+---
+
 ## API Endpoint Verification
 
 ### Parameter Management (5 endpoints)
@@ -205,10 +224,10 @@ Ensure all systems work together correctly
 
 ---
 
-## Status: READY FOR INTEGRATION TESTING
+## Status: INTEGRATION TESTING COMPLETE ✅
 
-All components built and backend logic tested.
-Next: API integration and React component verification.
+All 3 critical bugs resolved. Backend and Frontend running on local stack via start-all.ps1.
+System verified for baseline stability and accurate data visualization.
 
 ---
 

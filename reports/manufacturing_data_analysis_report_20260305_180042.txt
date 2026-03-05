@@ -1,0 +1,145 @@
+MANUFACTURING DATA ANALYSIS REPORT
+========================================================================================
+
+EXECUTIVE SUMMARY
+----------------------------------------------------------------------------------------
+Data folder: c:\new project\New folder\frontend\Data
+Machine source files detected: 5 (all CSV long-format, not XLSX)
+Parameter rows (xlsx/txt): 19/19 | name match: True
+MES rows: 5,758, machines: 5, parts: 41, scrap rate: 8.38%
+
+MACHINE: M231-11
+  Raw rows=100,000, pivot cycles=4,000, vars=28
+  Date range: 2026-01-14 06:20:21 to 2026-03-01 12:00:00
+  Timestamp: dup(ts,var)=0, avg_int=16.65m, p95=15.50m, max=27029.15m, gaps>60m=31
+  Completeness=100.00%, Scrap rate=0.25% (scrap_inc=131, shot_inc=51915)
+  Part mapping coverage=100.00%
+    MORNING: scrap_rate=0.22%
+    AFTERNOON: scrap_rate=0.18%
+    NIGHT: scrap_rate=0.28%
+    Worst part 1452301-1: 0.25%
+    Worst part 1379660-6: 0.00%
+    Worst part 1452305-1: 0.00%
+    Worst part 1544975-1: 0.00%
+    Worst part 2306910-1: 0.00%
+
+MACHINE: M356-57
+  Raw rows=100,000, pivot cycles=4,000, vars=28
+  Date range: 2026-01-14 23:01:27 to 2026-03-01 12:00:00
+  Timestamp: dup(ts,var)=0, avg_int=16.40m, p95=16.33m, max=5459.67m, gaps>60m=103
+  Completeness=100.00%, Scrap rate=0.65% (scrap_inc=1693, shot_inc=261261)
+  Part mapping coverage=100.00%
+    MORNING: scrap_rate=0.51%
+    AFTERNOON: scrap_rate=1.89%
+    NIGHT: scrap_rate=0.80%
+    Worst part 1-968839-1: 1.14%
+    Worst part 1-1418965-1: 0.83%
+    Worst part 1-969474-1: 0.65%
+    Worst part 1355789-1: 0.48%
+    Worst part 968176-1: 0.45%
+
+MACHINE: M471-23
+  Raw rows=100,000, pivot cycles=4,005, vars=29
+  Date range: 2026-01-14 19:39:42 to 2026-03-01 12:00:00
+  Timestamp: dup(ts,var)=0, avg_int=16.43m, p95=35.12m, max=2732.83m, gaps>60m=114
+  Completeness=96.32%, Scrap rate=0.30% (scrap_inc=922, shot_inc=311849)
+  Part mapping coverage=100.00%
+    MORNING: scrap_rate=0.29%
+    AFTERNOON: scrap_rate=0.18%
+    NIGHT: scrap_rate=0.30%
+    Worst part 1452204-1: 0.70%
+    Worst part 1-2141483-1: 0.55%
+    Worst part 3-1419167-7: 0.22%
+    Worst part 2236528-1: 0.20%
+    Worst part 2328414-1: 0.16%
+
+MACHINE: M607-30
+  Raw rows=100,000, pivot cycles=4,019, vars=29
+  Date range: 2025-12-28 20:32:06.502000 to 2026-03-01 12:00:00
+  Timestamp: dup(ts,var)=0, avg_int=22.45m, p95=41.36m, max=24664.86m, gaps>60m=128
+  Completeness=96.01%, Scrap rate=0.44% (scrap_inc=1327, shot_inc=304516)
+  Part mapping coverage=100.00%
+    MORNING: scrap_rate=0.31%
+    AFTERNOON: scrap_rate=0.04%
+    NIGHT: scrap_rate=0.51%
+    Worst part 1564254-1: 0.62%
+    Worst part 1-968791-1: 0.51%
+    Worst part 1-1670459-1: 0.47%
+    Worst part 1355081-1: 0.30%
+    Worst part 1-1670988-1: 0.08%
+
+MACHINE: M612-33
+  Raw rows=100,000, pivot cycles=3,998, vars=28
+  Date range: 2026-01-15 06:43:20 to 2026-03-01 12:00:00
+  Timestamp: dup(ts,var)=100, avg_int=16.29m, p95=9.17m, max=2756.33m, gaps>60m=78
+  Completeness=100.00%, Scrap rate=1.03% (scrap_inc=2380, shot_inc=231854)
+  Part mapping coverage=100.00%
+    MORNING: scrap_rate=1.26%
+    NIGHT: scrap_rate=0.50%
+    Worst part 2447665-1: 8.74%
+    Worst part 2177007-2: 2.65%
+    Worst part 1-1452341-2: 1.89%
+    Worst part 1-2292506-1: 0.74%
+    Worst part 2208339-1: 0.52%
+
+CROSS-MACHINE COMPARISON
+----------------------------------------------------------------------------------------
+Best scrap-rate machine: M231-11 (0.25%)
+Worst scrap-rate machine: M612-33 (1.03%)
+Best completeness: M231-11 (100.00%)
+Worst completeness: M607-30 (96.01%)
+
+KEY PARAMETER SUMMARY
+----------------------------------------------------------------------------------------
+Cushion:
+  M231-11: min=5.56, max=7.54, mean=5.84, std=0.41, proxy_viol=6.12%
+  M356-57: min=0.00, max=23.53, mean=6.04, std=2.27, proxy_viol=66.92%
+  M471-23: min=0.00, max=7.68, mean=5.79, std=1.49, proxy_viol=57.96%
+  M607-30: min=4.60, max=9.48, mean=6.27, std=1.12, proxy_viol=76.64%
+  M612-33: min=0.00, max=9.16, mean=5.02, std=1.86, proxy_viol=84.14%
+
+Injection_time:
+  M231-11: min=0.41, max=0.52, mean=0.51, std=0.02, proxy_viol=4.62%
+  M356-57: min=0.00, max=0.58, mean=0.45, std=0.11, proxy_viol=59.80%
+  M471-23: min=0.00, max=0.55, mean=0.34, std=0.15, proxy_viol=80.77%
+  M607-30: min=0.33, max=0.62, mean=0.45, std=0.11, proxy_viol=55.76%
+  M612-33: min=0.00, max=0.57, mean=0.41, std=0.13, proxy_viol=72.01%
+
+Injection_pressure:
+  M231-11: min=699.00, max=1463.00, mean=987.19, std=348.42, proxy_viol=40.67%
+  M356-57: min=0.00, max=1929.00, mean=1269.34, std=464.90, proxy_viol=65.22%
+  M471-23: min=0.00, max=1165.00, mean=827.85, std=235.79, proxy_viol=55.94%
+  M607-30: min=420.00, max=1425.00, mean=923.06, std=226.77, proxy_viol=74.17%
+  M612-33: min=0.00, max=2021.00, mean=1162.17, std=217.64, proxy_viol=19.51%
+
+Switch_pressure:
+  M231-11: min=696.00, max=1454.00, mean=981.72, std=345.41, proxy_viol=40.67%
+  M356-57: min=0.00, max=1916.00, mean=1260.32, std=462.59, proxy_viol=65.22%
+  M471-23: min=0.00, max=1159.00, mean=823.55, std=235.01, proxy_viol=55.95%
+  M607-30: min=416.00, max=1413.00, mean=916.56, std=221.85, proxy_viol=74.17%
+  M612-33: min=0.00, max=1996.00, mean=1154.15, std=213.85, proxy_viol=19.43%
+
+Cycle_time:
+  M231-11: min=9.18, max=14.06, mean=12.32, std=2.31, proxy_viol=nan%
+  M356-57: min=0.00, max=36.04, mean=13.90, std=9.46, proxy_viol=nan%
+  M471-23: min=0.00, max=17.08, mean=9.46, std=2.44, proxy_viol=nan%
+  M607-30: min=1.42, max=15.23, mean=10.47, std=1.96, proxy_viol=nan%
+  M612-33: min=0.00, max=99.06, mean=11.62, std=3.04, proxy_viol=nan%
+
+DASHBOARD ROOT-CAUSE FINDINGS
+----------------------------------------------------------------------------------------
+- Machine files are CSV long-format telemetry; if pipeline expects wide cycle XLSX, dashboard values will be wrong.
+- Scrap_counter and Shot_counter are cumulative; using raw values directly can produce extreme scrap percentages.
+- Parameter files contain mostly textual thresholds and no numeric setpoints; safe-limit math may be inconsistent.
+- MES part timeline merge is required for machine+part views; parsing date/time incorrectly causes part filter errors.
+- Timestamp normalization is required before past/future seam logic to avoid ordering issues.
+- LSTM null predictions likely come from incomplete/NaN sequence vectors after pivot.
+
+RECOMMENDATIONS
+----------------------------------------------------------------------------------------
+- Pivot machine CSV by timestamp+variable_name before analytics.
+- Compute scrap from positive counter deltas only.
+- Persist parsed numeric tolerance/setpoint fields in DB.
+- Expose part-mapping coverage and fallback status in API meta.
+- Enforce UTC normalization in MES + machine timestamps.
+- Validate LSTM input schema/order/NaN before prediction.

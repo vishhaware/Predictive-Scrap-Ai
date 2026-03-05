@@ -3616,6 +3616,13 @@ async def _build_machine_chart_data_payload(
             "part_number": resolved_part_number,
             "past": [],
             "future": [],
+            "safe_limits": {},
+            "safe_limits_frontend": {},
+            "part_filter_applied": bool(resolved_part_number),
+            "part_filter_total_cycles": 0,
+            "part_filter_matched_cycles": 0,
+            "part_filter_timeline_events": 0,
+            "part_filter_message": no_data_reason,
             "meta": {
                 "past_last_ts": None,
                 "future_first_ts": None,
@@ -3629,6 +3636,11 @@ async def _build_machine_chart_data_payload(
                 "part_number": resolved_part_number,
                 "part_scope_mode": part_scope_mode,
                 "part_filter_scope": part_scope,
+                "part_filter_applied": bool(resolved_part_number),
+                "part_filter_total_cycles": 0,
+                "part_filter_matched_cycles": 0,
+                "part_filter_timeline_events": 0,
+                "part_filter_message": no_data_reason,
                 "no_data_reason": no_data_reason,
             },
         }
@@ -3658,6 +3670,14 @@ async def _build_machine_chart_data_payload(
     part_filter_scope = "machine_only"
     part_scope_mode = "machine_window"
     no_data_reason: Optional[str] = None
+    part_filter_meta: Dict[str, Any] = {
+        "applied": bool(resolved_part_number),
+        "part_number": resolved_part_number,
+        "total_cycles": len(raw_cycles),
+        "matched_cycles": len(cycles_for_chart),
+        "timeline_events": 0,
+        "message": "Part filter not requested." if not resolved_part_number else "",
+    }
 
     if resolved_part_number:
         part_scope_mode = "strict_24h_with_historical_fallback"
@@ -3666,6 +3686,7 @@ async def _build_machine_chart_data_payload(
             resolved_machine_id,
             resolved_part_number,
         )
+        part_filter_meta = dict(part_meta or part_filter_meta)
         if part_cycles:
             cycles_for_chart = _sorted_cycles_asc(part_cycles)
             part_filter_scope = "machine+part"
@@ -3687,6 +3708,7 @@ async def _build_machine_chart_data_payload(
             if expanded_part_cycles:
                 cycles_for_chart = _sorted_cycles_asc(expanded_part_cycles[-clamped_history_limit:])
                 part_filter_scope = "machine+part_historical"
+                part_filter_meta = dict(expanded_meta or part_filter_meta)
                 no_data_reason = (
                     f"Selected part not present in last {clamped_shift_hours}h; "
                     "using latest historical part-aligned cycles."
@@ -3695,29 +3717,40 @@ async def _build_machine_chart_data_payload(
                 # Keep machine-level continuity to prevent empty chart payloads when
                 # MES timeline does not match selected part in the current window.
                 part_filter_scope = "machine_fallback"
+                part_filter_meta = dict(expanded_meta or part_filter_meta)
                 no_data_reason = str(
                     expanded_meta.get("message")
                     or part_meta.get("message")
                     or "No part-aligned cycles found; using machine-level timeline fallback."
                 )
+    part_filter_meta["matched_cycles"] = len(cycles_for_chart)
+    part_filter_meta["total_cycles"] = len(raw_cycles)
 
     past_rates_pct: List[float] = []
     past_rows: List[Dict[str, Any]] = []
     observed_events, observed_pct_series = _compute_observed_scrap_series(cycles_for_chart, window_size=20)
     for idx, cycle in enumerate(cycles_for_chart):
-        scrap_prob = _clamp_scrap_probability(
+        # Model prediction (may be miscalibrated — kept for reference only)
+        model_prob = _clamp_scrap_probability(
             cycle.prediction.scrap_probability if cycle.prediction else 0.0
         )
-        scrap_pct = float(scrap_prob * 100.0)
-        past_rates_pct.append(scrap_pct)
+        model_pct = float(model_prob * 100.0)
+
+        # BUG #1 FIX: Use OBSERVED scrap rate as primary display metric
+        # observed_pct_series is based on scrap_counter deltas (actual events)
+        obs_pct = round(observed_pct_series[idx], 4) if idx < len(observed_pct_series) else 0.0
+        obs_prob = round(obs_pct / 100.0, 6)
+
+        past_rates_pct.append(obs_pct)
         past_rows.append(
             {
                 "timestamp": cycle.timestamp.isoformat(),
-                "scrap_prob": round(scrap_prob, 6),
-                "scrap_pct": round(scrap_pct, 4),
-                "model_scrap_pct": round(scrap_pct, 4),
+                "scrap_prob": obs_prob,
+                "scrap_pct": obs_pct,
+                "model_scrap_pct": round(model_pct, 4),
+                "model_scrap_prob": round(model_prob, 6),
                 "observed_scrap_event": int(observed_events[idx]) if idx < len(observed_events) else 0,
-                "observed_scrap_pct": round(observed_pct_series[idx], 4) if idx < len(observed_pct_series) else 0.0,
+                "observed_scrap_pct": obs_pct,
                 "volatility_6pt": 0.0,
                 "segment": "Past",
                 "source": "observed",
@@ -3741,6 +3774,14 @@ async def _build_machine_chart_data_payload(
         no_data_reason = control_room_payload.get("no_data_reason") or no_data_reason
         part_scope_mode = str(control_room_payload.get("part_scope_mode") or part_scope_mode)
         part_filter_scope = str(control_room_payload.get("part_filter_scope") or part_filter_scope)
+        part_filter_meta = {
+            "applied": bool(control_room_payload.get("part_filter_applied", part_filter_meta.get("applied"))),
+            "part_number": control_room_payload.get("part_number") or part_filter_meta.get("part_number"),
+            "total_cycles": int(control_room_payload.get("part_filter_total_cycles", part_filter_meta.get("total_cycles") or 0)),
+            "matched_cycles": int(control_room_payload.get("part_filter_matched_cycles", part_filter_meta.get("matched_cycles") or 0)),
+            "timeline_events": int(control_room_payload.get("part_filter_timeline_events", part_filter_meta.get("timeline_events") or 0)),
+            "message": str(control_room_payload.get("part_filter_message") or part_filter_meta.get("message") or ""),
+        }
         raw_timeline = control_room_payload.get("future_timeline")
         if isinstance(raw_timeline, list):
             future_timeline = raw_timeline
@@ -3784,6 +3825,30 @@ async def _build_machine_chart_data_payload(
         future_dt = _parse_iso_timestamp(future_first_ts)
         seam_ok = bool(past_dt and future_dt and future_dt > past_dt)
 
+    # BUG #2 FIX: Re-align future timestamps when seam is broken
+    if not seam_ok and past_last_ts and future_rows and len(future_rows) > 0:
+        past_dt = _parse_iso_timestamp(past_last_ts)
+        if past_dt is not None:
+            # Calculate step interval from original future timestamps (default 1 min)
+            step_minutes = 1.0
+            if len(future_rows) >= 2:
+                ft0 = _parse_iso_timestamp(future_rows[0]["timestamp"])
+                ft1 = _parse_iso_timestamp(future_rows[1]["timestamp"])
+                if ft0 and ft1:
+                    diff_sec = (ft1 - ft0).total_seconds()
+                    if 10 < diff_sec < 7200:  # 10s to 2h sanity check
+                        step_minutes = diff_sec / 60.0
+            # Re-generate timestamps starting right after past_last_ts
+            for i, frow in enumerate(future_rows):
+                new_ts = past_dt + timedelta(minutes=step_minutes * (i + 1))
+                frow["timestamp"] = new_ts.isoformat()
+            future_first_ts = future_rows[0]["timestamp"]
+            seam_ok = True
+            logger.info(
+                "Chart-data seam re-aligned for %s: past ends %s, future starts %s (step=%.1fmin)",
+                resolved_machine_id, past_last_ts, future_first_ts, step_minutes,
+            )
+
     stats = (
         db.query(models.MachineStats)
         .filter(models.MachineStats.machine_id == resolved_machine_id)
@@ -3791,12 +3856,25 @@ async def _build_machine_chart_data_payload(
     )
     ingestion_time = getattr(stats, "last_loaded_timestamp", None) if stats else None
     resolved_part = control_room_payload.get("part_number") or resolved_part_number
+    safe_limits_raw = control_room_payload.get("safe_limits")
+    safe_limits_frontend = control_room_payload.get("safe_limits_frontend")
+    if not isinstance(safe_limits_raw, dict):
+        safe_limits_raw = {}
+    if not isinstance(safe_limits_frontend, dict):
+        safe_limits_frontend = {}
 
     payload = {
         "machine_id": resolved_machine_id,
         "part_number": resolved_part,
         "past": past_rows,
         "future": future_rows,
+        "safe_limits": safe_limits_raw,
+        "safe_limits_frontend": safe_limits_frontend,
+        "part_filter_applied": bool(part_filter_meta.get("applied", False)),
+        "part_filter_total_cycles": int(part_filter_meta.get("total_cycles", len(raw_cycles))),
+        "part_filter_matched_cycles": int(part_filter_meta.get("matched_cycles", len(cycles_for_chart))),
+        "part_filter_timeline_events": int(part_filter_meta.get("timeline_events", 0)),
+        "part_filter_message": str(part_filter_meta.get("message") or ""),
         "meta": {
             "past_last_ts": past_last_ts,
             "future_first_ts": future_first_ts,
@@ -3810,6 +3888,11 @@ async def _build_machine_chart_data_payload(
             "part_number": resolved_part,
             "part_scope_mode": part_scope_mode,
             "part_filter_scope": part_filter_scope,
+            "part_filter_applied": bool(part_filter_meta.get("applied", False)),
+            "part_filter_total_cycles": int(part_filter_meta.get("total_cycles", len(raw_cycles))),
+            "part_filter_matched_cycles": int(part_filter_meta.get("matched_cycles", len(cycles_for_chart))),
+            "part_filter_timeline_events": int(part_filter_meta.get("timeline_events", 0)),
+            "part_filter_message": str(part_filter_meta.get("message") or ""),
             "no_data_reason": no_data_reason,
         },
     }
@@ -4308,7 +4391,12 @@ async def get_machine_control_room(
         if history_df.empty:
             raise HTTPException(status_code=404, detail="No numeric sensor history available for forecasting.")
 
-    safe_limits_raw = calculate_dynamic_limits(history_df)
+    safe_limits_raw = calculate_dynamic_limits(
+        history_df,
+        machine_id=machine_id,
+        part_number=resolved_part if resolved_part != "UNKNOWN" else None,
+        db=db,
+    )
     safe_limits_frontend = convert_safe_limits_to_frontend(safe_limits_raw)
 
     model_meta = get_active_model_metadata(machine_id=machine_id, part_number=resolved_part if resolved_part != "UNKNOWN" else None)
@@ -4372,7 +4460,14 @@ async def get_machine_control_room(
                 part_number=resolved_part if resolved_part != "UNKNOWN" else None,
                 top_k=8,
             )
-            lstm_prob = _clamp(float(lstm_preview_payload.get("scrap_probability", 0.0)), 0.0, 1.0)
+            raw_prob = lstm_preview_payload.get("scrap_probability")
+            if raw_prob is not None:
+                lstm_prob = _clamp(float(raw_prob), 0.0, 1.0)
+            else:
+                logger.warning(
+                    "LSTM predict_batch returned None scrap_probability for %s (payload keys: %s)",
+                    machine_id, list(lstm_preview_payload.keys()),
+                )
             rate_candidate = _to_float(lstm_preview_payload.get("expected_scrap_rate"))
             if rate_candidate is not None:
                 lstm_expected_scrap_rate = _clamp(rate_candidate, 0.0, 1.0)
@@ -4385,9 +4480,22 @@ async def get_machine_control_room(
                 lstm_runtime_ready = False
                 lstm_unavailable_reason = err
             else:
-                logger.warning("LSTM preview failed for %s: %s", machine_id, exc)
+                logger.warning("LSTM preview RuntimeError for %s: %s", machine_id, exc, exc_info=True)
         except Exception as exc:
-            logger.warning("LSTM preview failed for %s: %s", machine_id, exc)
+            logger.warning("LSTM preview Exception for %s: %s", machine_id, exc, exc_info=True)
+
+    # BUG #3 FIX: Fallback — if LSTM was ready but returned no probability,
+    # use the statistical base_probability so dashboard never shows null
+    if lstm_prob is None and lstm_runtime_ready and len(lstm_sequence) >= 10:
+        lstm_prob = _clamp(base_probability, 0.0, 1.0)
+        lstm_unavailable_reason = (
+            lstm_unavailable_reason
+            or "LSTM inference returned no scrap_probability; using base_probability fallback."
+        )
+        logger.info(
+            "LSTM fallback for %s: using base_probability=%.4f as lstm_prob",
+            machine_id, lstm_prob,
+        )
 
     future_probs = [
         _clamp(_to_float(record.get("scrap_probability")) or 0.0, 0.0, 1.0)
@@ -4915,16 +5023,25 @@ async def get_predict_dashboard(
 def list_parameters(
     machine_id: Optional[str] = None,
     parameter_name: Optional[str] = None,
+    part_number: Optional[str] = None,
     db: Session = Depends(get_db)
 ):
     """List all parameter configurations with optional filtering."""
     query = db.query(models.ParameterConfig)
 
     if machine_id:
-        query = query.filter(models.ParameterConfig.machine_id == machine_id)
+        resolved_machine_id = _require_machine_id(machine_id)
+        query = query.filter(models.ParameterConfig.machine_id == resolved_machine_id)
 
     if parameter_name:
         query = query.filter(models.ParameterConfig.parameter_name.ilike(f"%{parameter_name}%"))
+
+    if part_number:
+        resolved_part_number = _normalize_part_number(part_number)
+        if resolved_part_number:
+            query = query.filter(models.ParameterConfig.part_number.ilike(resolved_part_number))
+        else:
+            query = query.filter(models.ParameterConfig.part_number.is_(None))
 
     configs = query.order_by(models.ParameterConfig.updated_at.desc()).all()
 
@@ -4957,12 +5074,18 @@ def create_update_parameter(
     db: Session = Depends(get_db)
 ):
     """Create or update a parameter configuration."""
+    normalized_parameter_name = str(request.parameter_name or "").strip()
+    if not normalized_parameter_name:
+        raise HTTPException(status_code=422, detail="parameter_name is required.")
+    normalized_machine_id = _require_machine_id(request.machine_id) if request.machine_id else None
+    normalized_part_number = _normalize_part_number(request.part_number) if request.part_number else None
+
     # Check for existing config
     existing = db.query(models.ParameterConfig).filter(
         and_(
-            models.ParameterConfig.parameter_name == request.parameter_name,
-            models.ParameterConfig.machine_id == request.machine_id,
-            models.ParameterConfig.part_number == request.part_number
+            models.ParameterConfig.parameter_name == normalized_parameter_name,
+            models.ParameterConfig.machine_id == normalized_machine_id,
+            models.ParameterConfig.part_number == normalized_part_number,
         )
     ).first()
 
@@ -5025,9 +5148,9 @@ def create_update_parameter(
     else:
         # Create new config
         new_config = models.ParameterConfig(
-            parameter_name=request.parameter_name,
-            machine_id=request.machine_id,
-            part_number=request.part_number,
+            parameter_name=normalized_parameter_name,
+            machine_id=normalized_machine_id,
+            part_number=normalized_part_number,
             tolerance_plus=request.tolerance_plus,
             tolerance_minus=request.tolerance_minus,
             default_set_value=request.default_set_value,

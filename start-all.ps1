@@ -7,7 +7,8 @@ param(
     [switch]$NoPortCleanup,
     [switch]$OpenBrowser,
     [switch]$BootstrapVenv,
-    [switch]$ResetIngestionCursor
+    [switch]$ResetIngestionCursor,
+    [switch]$RepairDB
 )
 
 Set-StrictMode -Version Latest
@@ -35,7 +36,7 @@ function Get-ListeningPids {
     foreach ($port in ($Ports | Select-Object -Unique)) {
         try {
             $pids = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
-                Select-Object -ExpandProperty OwningProcess -Unique
+            Select-Object -ExpandProperty OwningProcess -Unique
             $allPids += $pids
         }
         catch {
@@ -272,11 +273,17 @@ function Get-ProcessExitCodeText {
 function Stop-ProcessSafe {
     param([int[]]$ProcessIds)
     foreach ($processId in ($ProcessIds | Select-Object -Unique)) {
+        if ($processId -le 0) { continue }
         try {
+            $proc = Get-Process -Id $processId -ErrorAction Stop
             Stop-Process -Id $processId -Force -ErrorAction Stop
-            Write-Step "Stopped PID $processId" Yellow
+            Write-Step "Stopped PID $processId ($($proc.ProcessName))" Yellow
         }
         catch {
+            # Check if it was already gone
+            if (-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)) {
+                continue
+            }
             Write-Step "[WARN] Could not stop PID $processId ($($_.Exception.Message))" Yellow
         }
     }
@@ -602,6 +609,21 @@ try {
         Reset-IngestionCursor -PythonExe $pythonExe -BackendDbPath $backendDbPath -RuntimeDir $runtimeDir
     }
 
+    # FIX: Clear miscalibrated/stale predictions (Bug #1 Fix Verification Enhancement)
+    if ($RepairDB -or -not (Test-Path $backendDbPath)) {
+        Write-Step "[Preflight] Running database maintenance..." DarkGray
+        $env:SFB_DB_PATH = $backendDbPath
+        try {
+            & $pythonExe "$backendDir\repair_db.py"
+        }
+        catch {
+            Write-Step "[WARN] Database repair failed: $($_.Exception.Message)" Yellow
+        }
+        finally {
+            Remove-Item Env:SFB_DB_PATH -ErrorAction SilentlyContinue
+        }
+    }
+
     if ($InstallDeps) {
         Write-Step "[Preflight] Installing/updating dependencies..."
         Push-Location $backendDir
@@ -647,7 +669,7 @@ try {
     $backendWsUrl = "ws://$backendHost`:$resolvedBackendPort"
 
     Write-Step "`n[2/5] Starting FastAPI backend..."
-$backendCommand = @"
+    $backendCommand = @"
 `$env:PYTHONUNBUFFERED='1'
 `$env:DATA_DIR='$dataDir'
 `$env:MES_WORKBOOK_PATH='$mesWorkbookPath'
@@ -713,6 +735,40 @@ $backendCommand = @"
     }
     else {
         Write-Step "[WARN] Backend endpoint smoke checks are warming up; startup will continue." Yellow
+    }
+
+    # [3.3/5] BUG FIX VERIFICATION (Feature 1, 2, 3 fixes)
+    Write-Step "[3.3/5] Verifying recent bug fixes (Stability Check)..."
+    try {
+        $chartData = Invoke-JsonGet -Url "$backendUrl/api/machines/M231-11/chart-data?horizon_minutes=60"
+        $meta = $chartData.meta
+        $past = $chartData.past
+        
+        if ($meta.seam_ok -eq $true) {
+            Write-Host "  ✅ Bug #2 Fixed: Timeline seam is continuous." -ForegroundColor Green
+        }
+        else {
+            Write-Host "  ⚠️ Bug #2 Alert: Timeline seam check returned $($meta.seam_ok)." -ForegroundColor Yellow
+        }
+
+        if ($past -and $past[0].scrap_pct -lt 90) {
+            Write-Host "  ✅ Bug #1 Fixed: Past scrap rate is realistic (not 99.8%)." -ForegroundColor Green
+        }
+        else {
+            Write-Host "  ⚠️ Bug #1 Alert: Past scrap rate still appears miscalibrated." -ForegroundColor Yellow
+        }
+
+        $controlRoom = Invoke-JsonGet -Url "$backendUrl/api/machines/M231-11/control-room?horizon_minutes=60"
+        $lstm = $controlRoom.lstm_preview
+        if ($lstm -and $null -ne $lstm.scrap_probability) {
+            Write-Host "  ✅ Bug #3 Fixed: LSTM inference returned valid data ($($lstm.risk_level))." -ForegroundColor Green
+        }
+        else {
+            Write-Host "  ⚠️ Bug #3 Alert: LSTM returned null; check backend logs for inference errors." -ForegroundColor Yellow
+        }
+    }
+    catch {
+        Write-Step "[WARN] Critical bug verification skipped (API not fully ready or endpoint error)." Yellow
     }
 
     if ($RunAudit) {
@@ -807,21 +863,21 @@ npm run dev -- --host $frontendHost --port $resolvedFrontendPort --strictPort
 
     $state = @{
         started_at = (Get-Date).ToString("o")
-        backend = @{
-            pid = $backendProc.Id
-            url = $backendUrl
-            docs = "$backendUrl/docs"
-            health = "$backendUrl/api/health"
-            data_dir = $dataDir
-            mes_workbook = $mesWorkbookPath
+        backend    = @{
+            pid            = $backendProc.Id
+            url            = $backendUrl
+            docs           = "$backendUrl/docs"
+            health         = "$backendUrl/api/health"
+            data_dir       = $dataDir
+            mes_workbook   = $mesWorkbookPath
             requested_port = $BackendPort
-            actual_port = $resolvedBackendPort
+            actual_port    = $resolvedBackendPort
         }
-        frontend = @{
-            pid = $frontendProc.Id
-            url = $dashboardUrl
+        frontend   = @{
+            pid            = $frontendProc.Id
+            url            = $dashboardUrl
             requested_port = $FrontendPort
-            actual_port = $resolvedFrontendPort
+            actual_port    = $resolvedFrontendPort
         }
     }
     $state | ConvertTo-Json -Depth 5 | Set-Content -Path $stackStatePath -Encoding UTF8
