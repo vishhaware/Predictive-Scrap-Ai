@@ -163,8 +163,16 @@ export default function EngineerView() {
     const healthyCount = telemetryRows.filter((row) => row.status === 'ok').length;
     const modelLabel = latest?.predictions?.model_label || latest?.predictions?.engine_version || 'forecasted model';
     const lastUpdateLabel = latest?.timestamp ? new Date(latest.timestamp).toLocaleString() : 'N/A';
-    const futureStartLabel = chartData?.meta?.future_first_ts
-        ? new Date(chartData.meta.future_first_ts).toLocaleString()
+    const pastLastTs = chartData?.meta?.past_last_ts
+        || (Array.isArray(chartData?.past) && chartData.past.length
+            ? chartData.past[chartData.past.length - 1]?.timestamp
+            : null);
+    const futureFirstTs = chartData?.meta?.future_first_ts
+        || (Array.isArray(chartData?.future) && chartData.future.length
+            ? chartData.future[0]?.timestamp
+            : null);
+    const futureStartLabel = futureFirstTs
+        ? new Date(futureFirstTs).toLocaleString()
         : 'N/A';
 
     const violations = useMemo(() => {
@@ -264,7 +272,7 @@ export default function EngineerView() {
 
             {chartData?.meta && (
                 <div className="engineer-seam-note">
-                    Past -&gt; Future seam — last observed: {chartData.meta.past_last_ts ? new Date(chartData.meta.past_last_ts).toLocaleString() : 'N/A'} · first forecast: {chartData.meta.future_first_ts ? new Date(chartData.meta.future_first_ts).toLocaleString() : 'N/A'}
+                    Past -&gt; Future seam — last observed: {pastLastTs ? new Date(pastLastTs).toLocaleString() : 'N/A'} · first forecast: {futureFirstTs ? new Date(futureFirstTs).toLocaleString() : 'N/A'}
                 </div>
             )}
             {activeTab === 'telemetry' && (

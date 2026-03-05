@@ -771,6 +771,18 @@ def _parse_mes_time_seconds(raw_value: Any) -> Optional[int]:
     except Exception:
         pass
 
+    # Datetime-like objects from Excel exports (including 1970 date placeholders)
+    # should be interpreted as time-of-day only.
+    if hasattr(raw_value, "hour") and hasattr(raw_value, "minute") and hasattr(raw_value, "second"):
+        try:
+            hh = int(getattr(raw_value, "hour"))
+            mm = int(getattr(raw_value, "minute"))
+            ss = int(getattr(raw_value, "second"))
+            if 0 <= hh < 48 and 0 <= mm < 60 and 0 <= ss < 60:
+                return (hh * 3600) + (mm * 60) + ss
+        except Exception:
+            pass
+
     # Already formatted clock string (e.g. "18:00:00")
     if isinstance(raw_value, str):
         text = raw_value.strip()
@@ -789,6 +801,13 @@ def _parse_mes_time_seconds(raw_value: Any) -> Optional[int]:
                 mm, ss = parts
                 if 0 <= mm < 60 and 0 <= ss < 60:
                     return (mm * 60) + ss
+        # Date-time strings like "1970-01-15 10:00:00"
+        try:
+            parsed_text = pd.Timestamp(text)
+            if not pd.isna(parsed_text):
+                return (int(parsed_text.hour) * 3600) + (int(parsed_text.minute) * 60) + int(parsed_text.second)
+        except Exception:
+            pass
 
     try:
         numeric = int(float(raw_value))
@@ -825,9 +844,12 @@ def _parse_mes_datetime(date_value: Any, time_value: Any) -> Optional[datetime]:
     if pd.isna(date_ts):
         return None
 
-    base = date_ts.to_pydatetime().replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=None)
+    raw_dt = date_ts.to_pydatetime().replace(microsecond=0, tzinfo=None)
+    base = raw_dt.replace(hour=0, minute=0, second=0, microsecond=0)
     seconds = _parse_mes_time_seconds(time_value)
     if seconds is None:
+        if raw_dt.hour or raw_dt.minute or raw_dt.second:
+            return raw_dt
         return base
     return base + timedelta(seconds=int(seconds))
 
@@ -3608,15 +3630,6 @@ async def _build_machine_chart_data_payload(
         .all()
     )
 
-    if resolved_part_number and not raw_cycles:
-        payload = _build_empty_payload(
-            no_data_reason=f"No machine telemetry found in last {clamped_shift_hours}h for strict machine+part scope.",
-            part_scope_mode="strict_24h_machine_part",
-            part_scope="machine+part_no_data",
-        )
-        machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
-        return payload
-
     if not raw_cycles:
         raw_cycles = (
             db.query(models.Cycle)
@@ -3633,23 +3646,46 @@ async def _build_machine_chart_data_payload(
     no_data_reason: Optional[str] = None
 
     if resolved_part_number:
-        part_scope_mode = "strict_24h_machine_part"
+        part_scope_mode = "strict_24h_with_historical_fallback"
         part_cycles, part_meta = _filter_cycles_by_part_timeline(
             raw_cycles,
             resolved_machine_id,
             resolved_part_number,
         )
-        if not part_cycles:
-            no_data_reason = str(part_meta.get("message") or f"No last-{clamped_shift_hours}h cycles for selected part.")
-            payload = _build_empty_payload(
-                no_data_reason=no_data_reason,
-                part_scope_mode=part_scope_mode,
-                part_scope="machine+part_no_data",
+        if part_cycles:
+            cycles_for_chart = _sorted_cycles_asc(part_cycles)
+            part_filter_scope = "machine+part"
+        else:
+            expanded_limit = min(MAX_CYCLES_PER_MACHINE, max(clamped_history_limit * 12, 1000))
+            expanded_cycles = (
+                db.query(models.Cycle)
+                .options(joinedload(models.Cycle.prediction))
+                .filter(models.Cycle.machine_id == resolved_machine_id)
+                .order_by(models.Cycle.timestamp.desc(), models.Cycle.id.desc())
+                .limit(expanded_limit)
+                .all()
             )
-            machine_chart_cache[cache_key] = {"expires_at": now_epoch + MACHINE_CHART_CACHE_TTL_SEC, "payload": payload}
-            return payload
-        cycles_for_chart = _sorted_cycles_asc(part_cycles)
-        part_filter_scope = "machine+part"
+            expanded_part_cycles, expanded_meta = _filter_cycles_by_part_timeline(
+                expanded_cycles,
+                resolved_machine_id,
+                resolved_part_number,
+            )
+            if expanded_part_cycles:
+                cycles_for_chart = _sorted_cycles_asc(expanded_part_cycles[-clamped_history_limit:])
+                part_filter_scope = "machine+part_historical"
+                no_data_reason = (
+                    f"Selected part not present in last {clamped_shift_hours}h; "
+                    "using latest historical part-aligned cycles."
+                )
+            else:
+                # Keep machine-level continuity to prevent empty chart payloads when
+                # MES timeline does not match selected part in the current window.
+                part_filter_scope = "machine_fallback"
+                no_data_reason = str(
+                    expanded_meta.get("message")
+                    or part_meta.get("message")
+                    or "No part-aligned cycles found; using machine-level timeline fallback."
+                )
 
     past_rates_pct: List[float] = []
     past_rows: List[Dict[str, Any]] = []

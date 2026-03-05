@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "updated_at": "2026-02-27T23:55:00.000000+00:00",
+  "tasks": {
+    "scrap_classifier": {
+      "active": {
+        "global": "lightgbm_v1"
+      },
+      "history": {
+        "lightgbm_v1": {
+          "model_id": "lightgbm_v1",
+          "model_path": "C:/new project/New folder/backend_fastapi/models/lightgbm_scrap_risk_wide.pkl",
+          "family": "lightgbm",
+          "sensor_cols": [
+            "Cushion",
+            "Injection_time",
+            "Dosage_time",
+            "Injection_pressure",
+            "Switch_pressure",
+            "Switch_position",
+            "Cycle_time",
+            "Cyl_tmp_z1",
+            "Cyl_tmp_z2",
+            "Cyl_tmp_z3",
+            "Cyl_tmp_z4",
+            "Cyl_tmp_z5",
+            "Cyl_tmp_z8",
+            "Shot_size",
+            "Ejector_fix_deviation_torque"
+          ]
+        }
+      }
+    },
+    "scrap_sequence": {
+      "active": {
+        "global": "lstm_v1"
+      },
+      "history": {
+        "lstm_v1": {
+          "model_id": "lstm_v1",
+          "model_path": "C:/new project/New folder/backend_fastapi/models/lstm_scrap_risk.h5",
+          "family": "lstm_attention_dual",
+          "sequence_length": 30,
+          "horizon_cycles": 30,
+          "sensor_cols": [
+            "Cushion",
+            "Injection_time",
+            "Dosage_time",
+            "Injection_pressure",
+            "Switch_pressure",
+            "Switch_position",
+            "Cycle_time",
+            "Cyl_tmp_z1",
+            "Cyl_tmp_z2",
+            "Cyl_tmp_z3",
+            "Cyl_tmp_z4",
+            "Cyl_tmp_z5",
+            "Cyl_tmp_z8",
+            "Shot_size",
+            "Ejector_fix_deviation_torque"
+          ]
+        }
+      }
+    }
+  },
+  "models": {}
+}
